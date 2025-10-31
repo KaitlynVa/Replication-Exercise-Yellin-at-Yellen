@@ -1,0 +1,2862 @@
+---
+title: "Untitled"
+author: "Kaitlyn Vana"
+date: "2025-10-31"
+output: html_document
+---
+## Packages
+```{r setup, include=FALSE}
+# Load packages
+library(lubridate)
+library(stringr)
+library(tidycensus)
+library(tidyverse)
+
+
+# Set path 
+opts_knit$set(root.dir = "C:/Users/19728/Documents/ClassProjects/TAD/replication")
+```
+
+
+## R Markdown
+```{r}
+################################################################################
+##
+## Purpose: This script cleans the raw hearings.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/raw/hearings/.*.txt: Raw data from https://www.govinfo.gov/app/collection/chrg
+##    - ./data/prepped/hearings/converted_docs_new.csv: Saved intermediate file from this script
+##    - ./data/prepped/hearings/toCheck_12_25_2021_jbfixed_new.csv: Manually prepared data from an output of this script (./data/prepped/hearings/toCheck_12_25_2021.csv)
+##
+## - Outputs:
+##    - ./data/prepped/hearings/toCheck_12_25_2021.csv
+##    - ./data/prepped/hearings/converted_docs_new.csv
+##    - ./data/prepped/hearings/cleaned_docs.csv
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(tidyverse)
+require(stringdist)
+
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+fs <- list.files(path = './data/raw/hearings',pattern = '\\.txt')
+
+
+split_pattern <- paste0('\\s{4}(?=(M(s|r(s)*)\\.|Chair(wo)*man|Senator|Dr\\.) [[:alpha:]]+((\\s|-)[[:alpha:]]+){0,1}( of (',
+                        paste(state.name,collapse = '|'),
+                        '))*\\.( |-))|(?=The Chairman\\.( |-))|(?=The Clerk\\.( |-))|\\[(Whereupon|Prepare)')
+extract_pattern <- paste0('^(M(s|r(s)*)\\.|Chair(wo)*man|Senator|Dr\\.) [[:alpha:]]+((\\s|-)[[:alpha:]]+){0,1}( of (',
+                          paste(state.name,collapse = '|'),
+                          '))*\\.( |-)|The Chairman\\.( |-)|The Clerk\\.( |-)')
+hearings <- NULL
+for(doc in fs) {
+  dat <- readLines(paste0('./data/raw/hearings/',doc))
+  
+  
+  prepDat <- gsub('submitted by \\n  Senator Paul S\\. Sarbanes','submitted by Senator Paul S Sarbanes',
+                  gsub('\\\n    He starts out,','\n    Senator Bennett. He starts out,',
+                       gsub(' \\[(presiding|continuing)\\]','',
+                            gsub('\\\n    Me. Yellen. ','\n    Ms. Yellen. ',
+                                 gsub('\\\n    It is since we set the','\n    Ms. Yellen. It is since we set the',
+                                      gsub('\\\n    Well, one flaw is that the clearinghouse estimates','\n    Ms. Yellen. Well, one flaw is that the clearinghouse estimates',
+                                           gsub("Senator Shelby. That is prospective, isn't it","Senator Brown. That is prospective, isn't it",
+                                                gsub('Mr\\. Greenspan\\. The lead story today is \\$450 billion','Mr. Sherman. The lead story today is $450 billion',
+                                                     paste(dat,collapse = '\n')))))))))
+  
+  splits <- unlist(str_split(prepDat,split_pattern))
+  speakers <- gsub('-$','',trimws(str_extract(splits,pattern = extract_pattern)))
+  
+  text <- as_tibble(data.frame(docID = doc,
+                               speaker = speakers,
+                               text = splits,stringsAsFactors = F))
+  
+  if(doc == 'fed2004-07-21.txt') {
+    text <- text %>%
+      mutate(speaker = ifelse(speaker == 'Ms. Velasquez.','Ms. Velazquez.',speaker))
+  }
+  text <- text %>%
+    mutate(speaker = ifelse(speaker == 'Mr. Chairman.','The Chairman.',speaker))
+  speakerNames <- unique(text$speaker)[order(unique(text$speaker))]
+  
+  lookup <- NULL
+  for(spkr in speakerNames) {
+    if(is.na(spkr)) { next}
+    
+    if(spkr == 'The Chairman.') {
+      if(doc == 'fed2002-07-17.txt') {
+        extract <- toupper(gsub('\\n\\n|\\s{5,}','',str_extract(splits[1],'\\n\\n\\s{5,}[A-Z].*?Chair(wo)*man\\n')))
+      } else {
+        extract <- toupper(gsub('\\n\\n|\\s{5,}','',str_extract(splits[1],'\\n\\n\\s{5,}[A-Z].*?Chair(wo)*man\\n\\n')))
+      }
+      tmp <- unlist(sapply(toupper(c(state.name,'Guam')),function(x) grepl(paste0(' ',x),extract)))
+      state <- names(tmp)[which(tmp)]
+      if(length(state) > 1) {
+        state <- state[which(nchar(state) == max(nchar(state)))]
+      }
+      name <- gsub(',.*','',extract)
+    } else {
+      nm <- gsub(' \\w$','',toupper(trimws(gsub('(M(s|r(s)*)\\.|Chair(wo)*man|Senator)|Dr\\.|\\.','',gsub(' of .*','',spkr)))))
+      pat <- paste0('(\\n|\\s+).*? ',nm,'( JR\\.| I+| ESQ\\.)*, .*?(\\s{2,}|\\n)')
+      
+      if(!grepl('C O N T E N T S.*',toupper(splits[1]))) { stop() }
+      extract <- trimws(str_extract_all(gsub('C O N T E N T S.*','',toupper(splits[1])),pattern = pat)[[1]])
+      if(spkr == 'Ms. Garcia of Texas.' & doc == 'fed2019-07-10.txt') {
+        extract <- trimws(str_extract_all(gsub('C O N T E N T S.*','',toupper(splits[1])),pattern = paste0('(\\n|\\s+).*? ',nm,'( JR\\.| I+| ESQ\\.)*, .*'))[[1]])[2]
+      }
+      
+      if(length(extract) == 0) {
+        extract <- trimws(str_extract_all(toupper(splits[1]),pattern = pat)[[1]])
+      }
+      
+      if(any(grepl('\\s{2,}',extract))) {
+        extract[which(grepl('\\s{2,}',extract))] <- trimws(gsub('.*?\\s{2,}','',extract[which(grepl('\\s{2,}',extract))]))
+      }
+      if(length(extract) > 1 & any(grepl(paste(toupper(state.name),collapse = '|'),extract))) {
+        extract <- extract[which(grepl(paste(toupper(state.name),collapse = '|'),extract))]
+      }
+      if(length(extract) > 1 & grepl(' of ',spkr)) {
+        state <- gsub(' OF |\\.','',str_extract(toupper(spkr),' OF .*'))
+        extract <- extract[which(grepl(toupper(gsub('.* of |\\.','',spkr)),extract))]
+        name <- name <- gsub(',.*','',extract)
+      } else if(length(extract) > 1) {
+        intro <- text$text[min(which(text$speaker == spkr))-1]
+        states <- str_extract(intro,state.name)
+        states <- states[which(!is.na(states))]
+        extract <- extract[which(grepl(paste0(' ',toupper(states)),extract))]
+        
+        tmp <- sapply(toupper(c(state.name,'Guam')),function(x) grepl(paste0(' ',x),extract))
+        state <- names(tmp)[which(tmp)]
+        if(length(state) > 1) {
+          state <- state[which(nchar(state) == max(nchar(state)))]
+        }
+        name <- gsub(',.*','',extract)
+      } else {
+        if(length(extract) == 1) {
+          if(grepl('(NORTH)$',extract)) {
+            extract <- paste0(extract,' CAROLINA')
+          }
+          if(grepl('(WEST)$',extract)) {
+            extract <- paste0(extract,' VIRGINIA')
+          }
+        }
+        tmp <- unlist(sapply(toupper(c(state.name,'Guam')),function(x) grepl(paste0(' ',x),extract)))
+        state <- names(tmp)[which(tmp)]
+        if(length(state) > 1) {
+          state <- state[which(nchar(state) == max(nchar(state)))]
+        }
+        name <- gsub(',.*','',extract)
+      }
+      
+      if(length(state) > 1) {
+        extract <- trimws(str_extract_all(gsub('.*PRESENT:|\\\n','',toupper(splits[1])),pattern = paste0(nm,' OF \\w+(\\s\\w+){0,1}'))[[1]])
+        intro <- text$text[min(which(text$speaker == spkr))-1]
+        states <- str_extract(intro,state.name)
+        states <- states[which(!is.na(states))]
+        state <- trimws(gsub(paste0(nm,'|OF '),'',extract[which(grepl(toupper(states),extract))]))
+      }
+
+      if(length(state) > 1) {
+        if(spkr == 'Mrs. Maloney.') {
+          state <- 'NEW YORK'
+        } else if(spkr == 'Mr. Maloney.') {
+          state <- 'CONNECTICUT'
+        }
+        
+        if(spkr == 'Mr. Jones.') {
+          state <- 'NORTH CAROLINA'
+        } else if(spkr == 'Mrs. Jones.') {
+          state <- 'OHIO'
+        }
+        
+      }
+      
+      if(length(state) > 1) {
+        stop()
+      }
+      if(length(state) == 0) {
+        state <- ''
+      }
+      if(is.na(state)) {
+        state <- ''
+      }
+      if(state == 'WEST VIRGINIA  MICHAEL E. CAPUANO, MASSACHUSETTS') {
+        state <- 'WEST VIRGINIA'
+      }
+      if(state == 'WEST VIRGINIA  RUBEN HINOJOSA, TEXAS') {
+        state <- 'WEST VIRGINIA'
+      }
+      if(state == 'NORTH CAROLINA,  MAXINE WATERS, CALIFORNIA, RANKING') {
+        state <- 'NORTH CAROLINA'
+      }
+      if(state %in% c('','FITZPATRICK,') & spkr == 'Mr. Fitzpatrick.') {
+        state <- 'PENNSYLVANIA'
+      }
+      if(state == 'NORTH') {
+        state <- 'NORTH CAROLINA'
+      }
+      if(state == 'WEST') {
+        state <- 'WEST VIRGINIA'
+      }
+      if(spkr == 'Mr. Ross.' & doc == 'fed2002-07-17.txt') {
+        state <- 'ARKANSAS'
+      }
+    }
+    lookup <- bind_rows(lookup,data.frame(speaker = spkr,
+                                          name = ifelse(length(name) == 0,spkr,name),
+                                          state = state,stringsAsFactors = F))
+  }
+  
+  text <- text %>% left_join(lookup,by = 'speaker')
+  hearings <- bind_rows(hearings,text)
+}
+
+
+hearings <- hearings %>%
+  mutate(ind = row_number())
+
+# Only people without "states" are the Fed chairs and a number of experts
+hearings %>%
+  filter(state == '',
+         !grepl('Greenspan|Mattingly|Bernanke|Yellen',speaker)) %>%
+  select(speaker,state,docID) %>%
+  distinct() %>%
+  data.frame() %>% head()
+
+
+
+# Check to see if anyone is "responding" to themselves: 70 instances in total
+hearings %>%
+  mutate(ind = row_number(),
+         respondingTo = lag(speaker)) %>%
+  filter(speaker == respondingTo)
+
+# Manually inspect each and determine whether there is a mistake in the processing code above,
+#   a typo in the original text, or just the simple case that utterances can be separated by 
+#   things other than others' utterances (laughter, audio issues, recess, charts / presentations, etc.)
+selfResponseInds <- hearings %>%
+  mutate(respondingTo = lag(speaker)) %>%
+  filter(speaker == respondingTo) %>%
+  .$ind
+
+selfResponseInds <- lapply(selfResponseInds,function(x) c(x-1,x))
+
+# 1043:1045 are borked! What is happening here?
+#   NF thinks (and JB agrees) that the middle utterance should be attributed to Sherman, not Greenspan. Fixing above. (NB: everything that is "fixed above" will not correspond to these indices after they are fixed)
+# I think 4162:4164 should have Senator Bennett start talking again after Chairman Dodd says "without objection". If so, I'm going to modify the script above to insert the correct name at the start
+#   of that line and allow the processing to run. 
+# 5775:5776 seems to be an error due to a bathroom break and the additional indicator that Senator Carper is "presiding". I'm going to fix that above.
+# 15133:15134 looks like the transcription just FORGOT YELLEN'S NAME! That's alarming. Fixing above. 
+# 17049:17050 also looks like the transcription just forgot yellen! Fixing above again.
+# 18640:18641 seems to have mistakenly indicated that Shelby was speaking when it was in fact Brown. Fixing above. 
+(inds <- selfResponseInds[[44]])
+cat(hearings %>%
+      mutate(ind = row_number()) %>%
+      filter(ind %in% inds) %>%
+      .$text)
+
+# The below are all unneccesary line breaks due to vote tallying / notifications of where to find prepared statements / laughter / quotes / charts / beginnings of statements. Combine
+toComb <- list(c(selfResponseInds[[1]],selfResponseInds[[2]]),
+               c(selfResponseInds[[3]],selfResponseInds[[4]]),
+               selfResponseInds[[5]],selfResponseInds[[6]],selfResponseInds[[7]],
+               selfResponseInds[[8]], # I think 1058:1059 is some weird division where Mr. Sherman asks an outlandish question, and then the transcript puts in a pause, after which he speaks again to thank the chair for his time.
+               selfResponseInds[[9]],selfResponseInds[[10]],selfResponseInds[[11]],
+               selfResponseInds[[12]],selfResponseInds[[13]],selfResponseInds[[14]],
+               selfResponseInds[[15]],selfResponseInds[[16]],selfResponseInds[[17]],
+               selfResponseInds[[18]],selfResponseInds[[19]],selfResponseInds[[20]],
+               selfResponseInds[[21]],selfResponseInds[[22]],selfResponseInds[[23]],
+               selfResponseInds[[24]],selfResponseInds[[25]],selfResponseInds[[26]],
+               selfResponseInds[[27]],selfResponseInds[[28]],selfResponseInds[[29]],
+               selfResponseInds[[30]],selfResponseInds[[31]],selfResponseInds[[32]],
+               selfResponseInds[[33]],selfResponseInds[[34]],selfResponseInds[[35]],
+               selfResponseInds[[36]],selfResponseInds[[37]],selfResponseInds[[38]],
+               selfResponseInds[[39]],selfResponseInds[[40]],selfResponseInds[[41]],
+               selfResponseInds[[42]],selfResponseInds[[43]],selfResponseInds[[44]],
+               selfResponseInds[[45]],selfResponseInds[[46]],selfResponseInds[[47]],
+               selfResponseInds[[48]],selfResponseInds[[49]],selfResponseInds[[50]],
+               selfResponseInds[[51]],selfResponseInds[[52]],selfResponseInds[[53]],
+               selfResponseInds[[54]],selfResponseInds[[55]],selfResponseInds[[56]],
+               selfResponseInds[[57]],selfResponseInds[[58]],selfResponseInds[[59]],
+               selfResponseInds[[60]],
+               c(selfResponseInds[[61]],selfResponseInds[[62]],selfResponseInds[[63]]), # A sequence of Waters calling on people who don't reply
+               selfResponseInds[[64]],selfResponseInds[[65]],selfResponseInds[[66]],
+               selfResponseInds[[67]],
+               c(selfResponseInds[[68]],selfResponseInds[[69]]), # Another sequence of Waters calling on absent people
+               selfResponseInds[[70]])
+
+
+
+for(i in 1:length(toComb)) {
+  hearings$ind[which(hearings$ind %in% toComb[[i]])] <- toComb[[i]][1]
+}
+
+# So collapse these 68 offenders who are inaccurately separated, and remove the
+#   name of the speaker from the text itself.
+hearings <- hearings %>%
+  group_by(docID,speaker,state,ind,name) %>%
+  summarise(text = paste(gsub('^(M(s|r(s)*)\\.|Chair(wo)*man|Senator|Dr\\.) [[:alpha:]]+((\\s|-)[[:alpha:]]+){0,1}\\.( |-)|The Chairman\\.( |-)|The Clerk\\.( |-)','',text),collapse = '\n'),
+            nTest = n(),.groups = 'drop') %>%
+  arrange(ind)
+
+hearings %>%
+  mutate(respondingTo = lag(speaker)) %>%
+  filter(speaker == respondingTo)
+
+# Yay! No one is responding to themselves anymore! What a huge pain!
+
+table(hearings$state)
+
+hearings <- hearings %>%
+  mutate(speaker = ifelse(state == 'BARNEY FRANK, Massachusetts, Chairman','Chairman Frank.',
+                          ifelse(state == 'MICHAEL G. OXLEY, Ohio, Chairman','Chairman Oxley.',speaker)),
+         state = ifelse(state == 'BARNEY FRANK, Massachusetts, Chairman','MASSACHUSETTS, Chairman',
+                        ifelse(state == 'MICHAEL G. OXLEY, Ohio, Chairman','OHIO, Chairman',state)))
+
+hearings$position <- hearings$state2 <- NA
+for(i in 1:nrow(hearings)) {
+  hearings$position[i] <- str_split(hearings$state[i],', ')[[1]][2]
+  hearings$state2[i] <- gsub(',.*','',hearings$state[i])
+}
+
+
+hearings <- hearings %>%
+  mutate(nchars = nchar(text)) %>%
+  group_by(docID) %>%
+  mutate(ind = row_number()) %>%
+  ungroup()
+
+# Remove all non-verbal textual information (laugher, recess, etc.)
+hearings <- hearings %>%
+  mutate(textclean = gsub('\\[.*?\\]','',text))
+
+# Checking to see if we're missing speakers who should in fact be in there
+inspects <- hearings %>%
+  filter(is.na(speaker)) %>%
+  group_by(docID) %>%
+  summarise(n=n()) %>% filter(n != 2) %>% .$docID
+
+# Looks good! Of those hearings where we have more than two NA speakers (meaning the preamble and the postscript), 
+#   all of these appear to be additional technical details
+hearings %>% 
+  filter(docID %in% inspects) %>% 
+  filter(is.na(speaker)) %>%
+  filter(!grepl('^\\[|^,|^d statements,',text))
+
+# Looking for errors in two people with the same name
+test <- apply(table(hearings$speaker,hearings$state2),1,function(x) sum(x > 0))
+test[which(test > 1)] # 6 speakers are associated with more than one state
+
+# All of them are correct though! (based on manual inspection by JB). 
+hearings %>%
+  filter(speaker == 'Mr. Ross.') %>%
+  select(speaker,state2,docID) %>%
+  distinct()
+
+
+# What about with the full names?
+test <- apply(table(hearings$name,hearings$state2),1,function(x) sum(x > 0))
+test[which(test > 1)] # No name is associated with more than one state
+
+
+# What about people who aren't associated with states? They better be either Fed chairs or experts
+# Confirmed!
+hearings %>%
+  filter(state2 == '') %>%
+  select(speaker) %>%
+  distinct()
+
+chamberID <- hearings %>%
+  group_by(docID) %>%
+  summarise(senate = sum(grepl('Senat',speaker)))
+
+# Interesting...it seems the senate goes first/last on odd years and last/first on even years
+chamberID %>% data.frame()
+
+hearings <- hearings %>%
+  left_join(chamberID %>% mutate(chamber = ifelse(senate > 0,'Senate','House')) %>% select(docID,chamber))
+
+# Check-point since this is going to require a human review
+write.csv(hearings,file = './data/prepped/hearings/converted_docs_new.csv')
+
+
+# Need to link everyone with their opensecretsID (god help us)
+toFill <- hearings %>% filter(!is.na(speaker),state2 != '') %>% 
+  select(state2,docID,name,chamber) %>% distinct() %>%
+  mutate(year = lubridate::year(as.Date(gsub('fed|\\.txt','',docID)))) %>%
+  select(state2,year,name,chamber) %>% distinct()
+
+stateLookup <- data.frame(state = toupper(state.name),
+                          stab = state.abb)
+stateLookup <- bind_rows(stateLookup,
+                         data.frame(state = 'GUAM',
+                                    stab = 'GU'))
+
+toFill <- toFill %>%
+  left_join(stateLookup,by = c('state2' = 'state'))
+
+
+
+# So the trick here will be a multi-stage merge, wherein we first just match based on full name, and then go through those we missed.
+toCheck <- NULL
+for(yr in unique(toFill$year)) {
+  cycle <- floor(yr / 2)*2
+  # Stage 1: Names only
+  # Opening candidates (previous cycle)
+  candsFull <- NULL
+  for(cyc in c(cycle,(cycle+2))) {
+    if(cyc == 2022) { next }
+    candsFull <- bind_rows(candsFull,as_tibble(read.delim(paste0('./data/raw/donations/cands',substr(as.character(cyc),3,4),'.txt'),
+                                  col.names = c('cycle','fecID','opensecretsID','FirstLastP','party','distIDrunfor','distIDcurr',
+                                                'currCand','CycleCand','CRPICO','RecipCode','NoPacs'),sep = ',',quote = '|')))
+    
+  }
+  
+  cands <- candsFull %>%
+    mutate(stab = substr(distIDcurr,1,2),
+           name = toupper(gsub(' \\(.*','',FirstLastP))) %>%
+    select(opensecretsID,FirstLastP,party,distIDcurr,stab,name) %>%
+    distinct()
+  
+  merged <- toFill %>%
+    mutate(nameCln = gsub('OCASIOCORTEZ','OCASIO-CORTEZ',trimws(gsub("[^[:alnum:] ]", "",name)))) %>%
+    filter(year == yr) %>%
+    left_join(cands,by = c('nameCln' = 'name','stab')) %>%
+    filter(!is.na(FirstLastP))
+  
+  test <- merged %>%
+    group_by(opensecretsID) %>%
+    mutate(n=n()) %>% filter(n > 1)
+  if(nrow(test) > 0) {
+    merged <- merged %>%
+      filter(!opensecretsID %in% test$opensecretsID) %>%
+      bind_rows(toFill %>%
+                  mutate(nameCln = gsub('OCASIOCORTEZ','OCASIO-CORTEZ',trimws(gsub("[^[:alnum:] ]", "",name)))) %>%
+                  filter(year == yr) %>%
+                  left_join(candsFull %>%
+                              filter(opensecretsID %in% test$opensecretsID) %>%
+                              filter(cycle <= yr) %>%
+                              mutate(stab = substr(distIDcurr,1,2),
+                                     name = toupper(gsub(' \\(.*','',FirstLastP)),
+                                     year = yr) %>%
+                              select(opensecretsID,FirstLastP,party,distIDcurr,stab,name) %>%
+                              distinct(),by = c('nameCln' = 'name','stab')) %>%
+                  filter(!is.na(FirstLastP)))
+  }
+  
+  # So in the 2000 cycle data, we matched 32 out of 42 people on name only
+  unmatched <- toFill %>%
+    mutate(nameCln = gsub('OCASIOCORTEZ','OCASIO-CORTEZ',trimws(gsub("[^[:alnum:] ]", "",name)))) %>%
+    filter(year == yr) %>%
+    left_join(cands,by = c('nameCln' = 'name','stab')) %>%
+    filter(is.na(FirstLastP)) %>%
+    select(state2,name,year,stab,chamber)
+  
+  fixed <- NULL
+  if(nrow(unmatched) > 0) {
+    for(i in 1:nrow(unmatched)) {
+      if(unmatched$chamber[i] == 'Senate') {
+        ref <- cands %>%
+          filter(stab == unmatched$stab[i],
+                 substr(distIDcurr,3,3) == 'S')
+      } else {
+        ref <- cands %>%
+          filter(stab == unmatched$stab[i],
+                 grepl('\\d',substr(distIDcurr,3,3)))
+      }
+      
+      dists <- stringdist(ref$name,unmatched$name[i])
+      fixed <- bind_rows(fixed,
+                         bind_cols(unmatched %>%
+                                     slice(i),
+                                   ref %>%
+                                     slice(which.min(dists)) %>%
+                                     select(-name,-stab) %>%
+                                     mutate(dist = dists[which.min(dists)])))
+      
+    }
+  }
+  
+  toCheck <- bind_rows(toCheck,bind_rows(fixed,merged)) %>%
+    distinct()
+
+  if(any(is.na(toCheck$speaker))) { stop() }
+}
+
+
+# This is going to require a human review...happy holidays to me
+write.csv(toCheck,file = './data/prepped/hearings/toCheck_12_25_2021.csv')
+
+
+# WELL THAT WAS HELL!
+hearings <- read_csv('./data/prepped/hearings/converted_docs_new.csv',col_select = -1)
+lookup <- read_csv('./data/prepped/hearings/toCheck_12_25_2021_jbfixed_new.csv',col_select = -1)
+
+# Now need to make sure we don't have duplicates for a given year:
+#   Fixed! (But it was hell)
+lookup %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>%
+  filter(n > 1)
+
+
+# But it seems that the merge works fine...the only people we don't have IDs for are
+#   the Fed chairs and experts, neither of which we expect to have ids for anyway.
+hearings %>%
+  mutate(name = ifelse(name == 'BERNANKE' & state2 == '','BEN S. BERNANKE',
+                       ifelse(name == 'GREENSPAN' & state2 == '','ALAN GREENSPAN',
+                              ifelse(name == 'YELLEN' & state2 == '','JANET L. YELLEN',
+                                     ifelse(name == 'POWELL' & state2 == '','JEROME H. POWELL',name))))) %>%
+  left_join(lookup %>%
+              select(-dist,-nameCln,-matches('jb'))) %>%
+  filter(is.na(opensecretsID)) %>%
+  group_by(name) %>%
+  summarise(n=n())
+
+merged <- hearings %>%
+  mutate(name = ifelse(grepl('Bernanke',speaker),'BEN S. BERNANKE',
+                       ifelse(grepl('Greenspan',speaker),'ALAN GREENSPAN',
+                              ifelse(grepl('Yellen',speaker),'JANET L. YELLEN',
+                                     ifelse(grepl('Powell',speaker),'JEROME H. POWELL',name)))),
+         year = lubridate::year(as.Date(gsub('fed|\\.txt','',docID)))) %>%
+  left_join(lookup %>%
+              select(-dist,-nameCln,-matches('jb')))
+
+
+merged %>%
+  mutate(position = ifelse(grepl('Greenspan|Powell|Yellen|Bernanke',speaker) & is.na(state2),'Fed Chair',
+                           ifelse(grepl('Calabria|Kohn|McCloskey|Koo|Mattingly|Meltzer|Mishel|Taylor',speaker) & is.na(state2),'Expert',
+                                  ifelse(name == 'The Clerk.','Admin Support',
+                                         ifelse(grepl('Chair',speaker),'Committee Chair','Legislator'))))) %>%
+  mutate(speaker = gsub('Ms. Bachmann','Mrs. Bachmann',
+                        gsub('Mr. Bernanke','Chairman Bernanke',
+                             gsub('Ms. Biggert','Mrs. Biggert',
+                                  gsub('Mr. Greenspan','Chairman Greenspan',
+                                       gsub('Dr. Paul','Mr. Paul',
+                                            gsub('Senator Paul S.','Senator Sarbanes.',
+                                                 gsub('M(r)*s. Yellen','Chairwoman Yellen',
+                                                      gsub(' of \\w+(\\s\\w+)*\\.','.',speaker))))))))) %>%
+  mutate(speaker = ifelse(!is.na(name) & name == 'SUE W. KELLY','Mrs. Kelly.',speaker)) %>%
+  filter(is.na(speaker))
+
+merged <- merged %>%
+  mutate(position = ifelse(grepl('Greenspan|Powell|Yellen|Bernanke',speaker) & is.na(state2),'Fed Chair',
+                           ifelse(grepl('Calabria|Kohn|McCloskey|Koo|Mattingly|Meltzer|Mishel|Taylor',speaker) & is.na(state2),'Expert',
+                                  ifelse(name == 'The Clerk.','Admin Support',
+                                         ifelse(grepl('Chair',speaker),'Committee Chair','Legislator'))))) %>%
+  mutate(speaker = gsub('Ms. Bachmann','Mrs. Bachmann',
+                        gsub('Mr. Bernanke','Chairman Bernanke',
+                             gsub('Ms. Biggert','Mrs. Biggert',
+                                  gsub('Mr. Greenspan','Chairman Greenspan',
+                                       gsub('Dr. Paul','Mr. Paul',
+                                            gsub('Senator Paul S.','Senator Sarbanes.',
+                                                 gsub('M(r)*s. Yellen','Chairwoman Yellen',
+                                                      gsub(' of \\w+(\\s\\w+)*\\.','.',speaker))))))))) %>%
+  mutate(speaker = ifelse(!is.na(name) & name == 'SUE W. KELLY','Mrs. Kelly.',speaker)) %>%
+  mutate(opensecretsID = ifelse(is.na(opensecretsID) & position == 'Fed Chair',
+                                paste0('FED',gsub('^.*? (\\w{2,})','\\1',name)),
+                                ifelse(is.na(opensecretsID) & position == 'Expert',
+                                       paste0('EXPERT',gsub('^.*? (\\w{2,})','\\1',toupper(gsub('\\.','',name)))),
+                                       ifelse(position == 'Admin Support','ADMIN',opensecretsID))))
+  
+
+merged %>%
+  filter(is.na(speaker))
+
+# Everyone with an opensecretsID that shows up multiple times is either an 
+#   expert, a Fed chair, or a legislator who switches chambers, parties, or hearing Chair.
+#   There are also a few people who's recorded names were written slightly differently across hearings.
+(dupes <- merged %>%
+  select(speaker,name,position,chamber,party,stab,opensecretsID) %>%
+  distinct() %>%
+  arrange(name) %>%
+  group_by(opensecretsID) %>%
+  mutate(n=n()) %>%
+  filter(n > 1) %>%
+    data.frame()) %>%
+  arrange(opensecretsID)
+
+# So I think this is looking pretty good now. Saving to be linked with
+# - children
+# - bills
+# - demographics
+# - IG ratings
+write.csv(merged,file = './data/prepped/hearings/cleaned_docs.csv')
+
+# EOF
+```
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script prepares the information on the politicians.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/raw/politicians/1976-2020-house.csv: Raw data from https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/IG0UN2
+##    - ./data/raw/politicians/1976-2020-senate.csv: Raw data from https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/PEJ5QU
+##    - ./data/raw/politicians/new_legs_lookup_full.csv: Raw data from https://github.com/unitedstates/congress-legislators, manually prepared by Bisbee
+##    - ./data/raw/politicians/legislators-historical.csv: Raw data from https://github.com/unitedstates/congress-legislators
+##    - ./data/raw/politicians/HSall_members.csv: Raw data from VOTEVIEW (https://voteview.com/data)
+##    - ./data/prepped/hearings/cleaned_docs.csv: Prepped data from 1_DATA_hearings_prep.R
+##  - Outputs:
+##    - ./data/prepped/politicians/politician_prepped_new.csv
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(tidyverse)
+require(R.utils)
+require(openxlsx)
+
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+#   Want to JUST get some identifier attached to the vote data. How hard can this be?
+house <- read_csv('./data/raw/politicians/1976-2020-house.csv')
+senate <- read_csv('./data/raw/politicians/1976-2020-senate.csv')
+idlookupFull <- read_csv('./data/raw/politicians/new_legs_lookup_full.csv',col_select = -1)
+histIDs <- read_csv('./data/raw/politicians/legislators-historical.csv') # Why TF does the json not have the opensecrets ID?
+hearings <- read_csv('./data/prepped/hearings/cleaned_docs.csv',col_select = -1)
+ideo <- read_csv('./data/raw/politicians/HSall_members.csv')
+
+# In fact, just need to get the details for 287 of these bastards
+toMerge <- hearings %>%
+  filter(!is.na(name)) %>%
+  select(stab,distIDcurr,name,year,opensecretsID,party,chamber) %>% distinct() %>%
+  mutate(lname = gsub('.*? ','',gsub(' (JR\\.|SR\\.|I(I+|V))$','',name)))
+
+# How do we have two different distIDcurr for the same person in the same
+#   year? Need to go back to the hearings data creation for this, dammitall.
+toMerge %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>%
+  filter(n > 1)
+
+for(i in 1:nrow(house)) {
+  gsub('.*? ','',gsub('(,)* (JR\\.|SR\\.|I(I+|V))$','',utf8::utf8_encode(house$candidate[i])))
+}
+
+house <- house %>%
+  filter(!is.na(candidate)) %>%
+  group_by(year,candidate,totalvotes,state_po,office,district,stage,special,mode,unofficial,version) %>%
+  mutate(candidatevotes = sum(candidatevotes)) %>%
+  ungroup() %>%
+  mutate(lname = gsub('.*? ','',gsub('(,)* (JR\\.|SR\\.|I(I+|V))$','',utf8::utf8_encode(candidate))),
+         votepct = candidatevotes / totalvotes) %>%
+  ungroup()
+
+house <- house %>%
+  group_by(year,state_po,office,district,stage,special,mode,unofficial,version) %>%
+  mutate(votepct_rel = votepct - max(votepct[votepct != max(votepct)])) %>%
+  ungroup()
+
+
+senate <- senate %>%
+  filter(!is.na(candidate)) %>%
+  group_by(year,candidate,totalvotes,state_po,office,district,stage,special,mode,unofficial,version) %>%
+  mutate(candidatevotes = sum(candidatevotes)) %>%
+  mutate(lname = gsub('.*? ','',gsub('(,)* (JR\\.|SR\\.|I(I+|V))$','',utf8::utf8_encode(candidate))),
+         votepct = candidatevotes / totalvotes) %>%
+  ungroup()
+
+senate <- senate %>%
+  group_by(year,state_po,office,district,stage,special,mode,unofficial,version) %>%
+  mutate(votepct_rel = votepct - max(votepct[votepct != max(votepct)])) %>%
+  ungroup()
+
+toMerge$votepct <- toMerge$votepct_rel <- toMerge$strdist <- toMerge$voteName <- NA
+for(i in 1:nrow(toMerge)) {
+  toMerge[i,] %>% data.frame()
+  if(grepl("^FED|ADMIN|EXPERT",toMerge$opensecretsID[i])) { next }
+  if(toMerge$chamber[i] == 'Senate') {
+    ref <- senate %>% filter(state_po == toMerge$stab[i],
+                             lname == toupper(toMerge$lname[i]),
+                             year < (toMerge$year[i]))
+    # ref %>% data.frame()
+    if(nrow(ref) == 0) {
+      ref <- senate %>% filter(state_po == toMerge$stab[i],
+                               lname == toupper(toMerge$lname[i]))
+    }
+    tempDist <- abs(ref$year - toMerge$year[i])
+    ref <- ref %>%
+      slice(which(tempDist == min(tempDist)))
+    
+    dists <- stringdist::stringdist(toMerge$name[i],ref$candidate)
+    
+    ref <- ref %>%
+      slice(which.min(dists)) %>%
+      mutate(strdist = dists[which.min(dists)]) %>%
+      select(candidate,candidatevotes,totalvotes,votepct,strdist,votepct_rel)
+    if(nrow(ref) > 1) { stop() }
+    if(ref$votepct_rel < 0) { stop() }
+    toMerge$votepct[i] <- ref$votepct
+    toMerge$strdist[i] <- ref$strdist
+    toMerge$votepct_rel[i] <- ref$votepct_rel
+    toMerge$voteName[i] <- ref$candidate
+  }
+  
+  if(toMerge$chamber[i] == 'House') {
+    if(!toMerge$stab[i] %in% state.abb) { next }
+    
+    ref <- house %>% filter(state_po == toMerge$stab[i],
+                            lname == toupper(toMerge$lname[i]),
+                            year < (toMerge$year[i]))
+    ref %>% data.frame()
+    if(nrow(ref) == 0) {
+      ref <- house %>% filter(state_po == toMerge$stab[i],
+                              lname == toupper(toMerge$lname[i]))
+    }
+    if(nrow(ref) == 0) {
+      ref <- house %>% 
+        mutate(stdist = paste0(state_po,sprintf('%02d',district))) %>%
+        filter(stdist == toMerge$distIDcurr[i])
+    }
+    tempDist <- abs(ref$year - toMerge$year[i])
+    ref <- ref %>%
+      slice(which(tempDist == min(tempDist)))
+    
+    dists <- stringdist::stringdist(toMerge$name[i],ref$candidate)
+    
+    ref <- ref %>%
+      slice(which.min(dists)) %>%
+      mutate(strdist = dists[which.min(dists)]) %>%
+      select(candidate,candidatevotes,totalvotes,votepct,strdist,votepct_rel)
+    if(nrow(ref) > 1) { stop() }
+    if(ref$votepct_rel < 0) { stop() }
+    toMerge$votepct[i] <- ref$votepct
+    toMerge$strdist[i] <- ref$strdist
+    toMerge$votepct_rel[i] <- ref$votepct_rel
+    toMerge$voteName[i] <- ref$candidate
+  }
+}
+
+# 100% perfect! Screw Leip and moving to a new R script for cleanliness! (98 are fuzzy matches, but
+#   all of them are correct based on manual inspection)
+toMerge %>%
+  select(distIDcurr,name,voteName,votepct,strdist) %>%
+  arrange(-strdist) %>%
+  data.frame()
+
+
+# So now let's merge with the rest of the politician-specific data
+# Only 14 speakers don't match
+
+unmatched <- toMerge %>%
+  filter(!grepl('FED|EXPERT|ADMIN',opensecretsID)) %>%
+  left_join(idlookupFull %>%
+              select(year,bioguide,opensecretsID = opensecrets,
+                     first,last,birthday,gender,state,district,nickname,
+                     yearStart)) %>%
+  filter(is.na(birthday))
+
+
+
+matched <- toMerge %>%
+  filter(!grepl('FED|EXPERT|ADMIN',opensecretsID)) %>%
+  left_join(idlookupFull %>%
+              select(year,bioguide,opensecretsID = opensecrets,
+                     first,last,birthday,gender,state,district,nickname,
+                     yearStart)) %>%
+  filter(!is.na(birthday))
+
+# All of the unmatched are either from 2001 or 2002? wtf?
+unmatched %>%
+  select(year,name,distIDcurr,stab,opensecretsID)
+
+# It seems to simply be because these don't have an opensecrets ID in the lookup data
+idlookupFull %>%
+  filter(year == 2001) %>%
+  filter(state == 'TX') %>%
+  select(bioguide,opensecrets,first,last) %>%
+  data.frame()
+
+# Manually assigning the correct opensecrets IDs to these guys
+idlookupFull <- idlookupFull %>%
+  mutate(opensecrets = ifelse(is.na(opensecrets) & bioguide=='L000556','N00001305',
+                              ifelse(is.na(opensecrets) & bioguide == 'G000365','N00005709',
+                                     ifelse(is.na(opensecrets) & bioguide == 'R000465','N00000740',
+                                            ifelse(is.na(opensecrets) & bioguide == 'M000212','N00001339',
+                                                   ifelse(is.na(opensecrets) & bioguide == 'R000258','N00003071',
+                                                          ifelse(is.na(opensecrets) & bioguide == 'G000547','N00012774',
+                                                                 ifelse(is.na(opensecrets) & bioguide == 'B000400','N00005805',opensecrets))))))))
+
+
+# Make "yearStart" the first year they enter congress
+idlookupMerge <- idlookupFull %>%
+  select(year,bioguide,opensecretsID = opensecrets,
+         first,last,birthday,gender,state,district,nickname,
+         yearStart) %>%
+  filter(opensecretsID %in% toMerge$opensecretsID) %>%
+  group_by(opensecretsID,state,district) %>%
+  mutate(yearStart = min(yearStart)) %>%
+  distinct()
+
+# And perfect match!
+unmatched <- toMerge %>%
+  filter(!grepl('FED|EXPERT|ADMIN',opensecretsID)) %>%
+  left_join(idlookupMerge) %>%
+  filter(is.na(birthday))
+
+
+toMergeFull <- toMerge %>%
+  left_join(idlookupMerge) %>%
+  mutate(age = year - lubridate::year(as.Date(birthday)),
+         seniority = year - yearStart)
+
+# 86 of these merges have multiple observations, presumably due to 
+#   the legislator finishing a stint in the House and starting one in the senate 
+#   in the same year. Do we therefore want to measure seniority as total time in 
+#   Congress writ large, or total time in their specific chamber? I think the
+#   former better captures the concept of interest -- their experience serving
+#   as legislator. (Although we should probably also want to get their seniority
+#   as a member of a specific committee?)
+toMergeFull %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n = n()) %>%
+  filter(n > 1) %>%
+  data.frame()
+
+
+idlookupMerge <- idlookupFull %>%
+  select(year,bioguide,opensecretsID = opensecrets,
+         first,last,birthday,gender,nickname,
+         yearStart) %>%
+  filter(opensecretsID %in% toMerge$opensecretsID) %>%
+  group_by(opensecretsID) %>%
+  mutate(yearStart = min(yearStart)) %>%
+  distinct()
+
+
+toMerge %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>%
+  filter(n > 1)
+
+toMergeFull <- toMerge %>%
+  left_join(idlookupMerge) %>%
+  mutate(age = year - lubridate::year(as.Date(birthday)),
+         seniority = year - yearStart)
+
+toMergeFull %>%
+  distinct() %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>% filter(n > 1)
+
+# Adding in ideology
+
+# Great match EXCEPT for N00042619, the dude from Guam. His voting record is almost identical to 
+#   Lisa Blunt Rochester, so I'll just give him her ideology: https://projects.propublica.org/represent/members/S001204-michael-san-nicolas/compare-votes/B001303-lisa-blunt-rochester/116
+toMergeFull %>%
+  left_join(ideo %>%
+              select(icpsr,bioguide = bioguide_id,nominate_dim1,nominate_dim2) %>%
+              distinct()) %>%
+  select(name,opensecretsID,nominate_dim1) %>%
+  filter(is.na(nominate_dim1)) %>% data.frame() %>%
+  distinct()
+
+# Weird...so there are two people whose nominate scores change between the 
+#   112 and 114 congresses. I'm just going to select the nominate score
+#   associated with fewer errors. 
+ideo %>%
+  filter(congress >= 106) %>%
+  # select(icpsr,bioguide = bioguide_id,nominate_dim1,nominate_dim2) %>%
+  distinct() %>%
+  filter(!is.na(bioguide_id)) %>%
+  group_by(bioguide_id) %>%
+  summarise(nominate_dim1 = mean(nominate_dim1),
+            nominate_dim2 = mean(nominate_dim2),.groups = 'drop') %>%
+  filter(bioguide_id %in% c('D000613','G000570')) %>% data.frame()
+
+toMergeFull <- toMergeFull %>%
+  left_join(ideo %>%
+              filter(congress >= 106) %>%
+              select(bioguide = bioguide_id,nominate_dim1,nominate_dim2) %>%
+              distinct() %>%
+              filter(!is.na(bioguide)) %>%
+              group_by(bioguide) %>%
+              summarise(nominate_dim1 = mean(nominate_dim1),
+                        nominate_dim2 = mean(nominate_dim2),.groups = 'drop')) %>%
+  mutate(nominate_dim1 = ifelse(opensecretsID == 'N00042619',-.334,nominate_dim1))
+
+# No duplicates
+toMergeFull %>%
+  distinct() %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>% filter(n > 1) %>%
+  data.frame()
+
+# So we DO want to do something about missing data for gender, ideology, age, and seniority for the
+#   Fed chairs and experts to ensure we don't drop them from all regressions.
+
+# Age and seniority is easy enough for the Fed chairs, a bit trickier for experts. 
+#   We assume that Fed chairs and experts are non-partisan and non-ideological. 
+#   This assumption reflects the normative aspirations of their role at committee hearings, 
+#   and not the actual views of the authors. (Many of the experts invited to the 2014-02-11 hearing
+#   are clearly Republican affiliated and ideologically conservative.)
+toMergeFull %>%
+  filter(is.na(nominate_dim1)) %>%
+  select(name,opensecretsID) %>%
+  distinct()
+
+hearings %>%
+  filter(grepl('McCloskey',speaker)) %>% select(docID)
+
+toMergeFull <- toMergeFull %>%
+  mutate(age = ifelse(opensecretsID == 'FEDYELLEN',year - 1946,
+                      ifelse(opensecretsID == 'FEDGREENSPAN',year - 1926,
+                             ifelse(opensecretsID %in% c('FEDBERNANKE','FEDPOWELL'),year - 1953,
+                                    ifelse(opensecretsID == 'EXPERTMATTINGLY',year - 1944, # https://prabook.com/web/j.virgil.mattingly/3630794
+                                           ifelse(opensecretsID == 'EXPERTKOHN',year - 1942, # https://en.wikipedia.org/wiki/Donald_Kohn
+                                                  ifelse(opensecretsID == 'EXPERTKOO',year - 1954, # https://en.wikipedia.org/wiki/Richard_Koo 
+                                                         ifelse(opensecretsID == 'EXPERTMELTZER',year - 1928, # https://en.wikipedia.org/wiki/Allan_H._Meltzer
+                                                                ifelse(opensecretsID == 'EXPERTMISHEL',year - 1953, # https://prabook.com/web/lawrence.mishel/3469231
+                                                                       ifelse(opensecretsID == 'EXPERTTAYLOR',year - 1946, # https://en.wikipedia.org/wiki/John_B._Taylor
+                                                                              ifelse(opensecretsID == 'EXPERTCALABRIA',year - 1969, # https://en.wikipedia.org/wiki/Mark_A._Calabria
+                                                                                     ifelse(opensecretsID == 'EXPERTMCCLOSKEY',year - 1987, # https://static1.squarespace.com/static/5627d283e4b0458929042617/t/582b5edb5016e110994e6986/1479237340032/Abigail+McCloskey+CV.pdf (best guess based on BA tenure)
+                                                                                     age))))))))))), 
+         seniority = ifelse(opensecretsID == 'FEDYELLEN',year - 2014,
+                            ifelse(opensecretsID == 'FEDGREENSPAN',year - 1987,
+                                   ifelse(opensecretsID == 'FEDBERNANKE',year - 2006,
+                                          ifelse(opensecretsID == 'FEDPOWELL',year - 2018,
+                                                 ifelse(opensecretsID == 'EXPERTMATTINGLY',year - 1989, # https://prabook.com/web/j.virgil.mattingly/3630794
+                                                        ifelse(opensecretsID == 'EXPERTKOHN',year - 2002, # https://en.wikipedia.org/wiki/Donald_Kohn
+                                                               ifelse(opensecretsID == 'EXPERTKOO',year - 1997, # https://en.wikipedia.org/wiki/Richard_Koo
+                                                                      ifelse(opensecretsID == 'EXPERTMELTZER',year - 1999, # https://en.wikipedia.org/wiki/Allan_H._Meltzer
+                                                                             ifelse(opensecretsID == 'EXPERTMISHEL',year - 1987, # https://en.wikipedia.org/wiki/Lawrence_Mishel
+                                                                                    ifelse(opensecretsID == 'EXPERTTAYLOR',year - 1993, # https://en.wikipedia.org/wiki/John_B._Taylor
+                                                                                           ifelse(opensecretsID == 'EXPERTCALABRIA',year - 2017, # https://en.wikipedia.org/wiki/Mark_A._Calabria
+                                                                                                  ifelse(opensecretsID == 'EXPERTMCCLOSKEY',year - 2013, # https://static1.squarespace.com/static/5627d283e4b0458929042617/t/582b5edb5016e110994e6986/1479237340032/Abigail+McCloskey+CV.pdf (best guess based publication record)
+                                                                                                  seniority)))))))))))), 
+         gender = ifelse(opensecretsID %in% c("FEDPOWELL","FEDGREENSPAN",'FEDBERNANKE'),'M',
+                         ifelse(opensecretsID == 'FEDYELLEN','F',
+                                ifelse(opensecretsID == 'EXPERTMCCLOSKEY','F',
+                                       ifelse(grepl('EXPERT',opensecretsID),'M',gender)))),
+         nominate_dim1 = ifelse(grepl('FED|EXPERT|ADMIN',opensecretsID),0,nominate_dim1),
+         nominate_dim2 = ifelse(grepl('FED|EXPERT|ADMIN',opensecretsID),0,nominate_dim2))
+
+# The only remaining speaker for whom we do not have age, seniority, or gender is the Clerk who we will drop.
+toMergeFull %>%
+  distinct() %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>%
+  filter(n > 1) %>% data.frame()
+
+
+write.csv(toMergeFull,file = './data/prepped/politicians/politician_prepped_new.csv')
+
+# EOF
+```
+
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script is an intermediate merge to help further clean the data.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/prepped/hearings/cleaned_docs.csv: Prepped data from 1_DATA_hearings_prep.R
+##    - ./data/prepped/demographics/child_gender_final.csv: Prepped data from 3_DATA_child_gender_prep.R
+##    - ./data/prepped/demographics/kids_to_check_12_25_2021_jb_manual.csv: Manually prepared data from an output of this script (./data/prepped/demographics/kids_to_check_12_25_2021.csv)
+##    - ./data/prepped/politicians/politician_prepped_new.csv: Prepped data from 2_DATA_politician_prep.R
+##    - ./data/raw/politicians/legislators-historical.csv: Raw data from https://github.com/unitedstates/congress-legislators
+##    - ./data/raw/politicians/legislators-current.csv: Raw data from https://github.com/unitedstates/congress-legislators
+##    - ./data/prepped/demographics/IG_ratings_new.csv: Prepped data from 0_DATA_IG_scraper.R (not run as part of replication)
+##    - ./data/raw/donations/cands##.txt: Raw data on campaign contributions from OpenSecrets (https://www.opensecrets.org/bulk-data)
+##    - ./data/prepped/demographics/IG_toclean_JBchecked.csv: Manually prepared data from an output of this script (./data/prepped/demographics/IG_toclean.csv)
+##    - ./data/prepped/demographics/child_gender_final_merged.csv: Saved intermediate file from this script 
+##  - Outputs:
+##    - ./data/prepped/demographics/kids_to_check_12_25_2021.csv
+##    - ./data/prepped/demographics/IG_toclean.csv
+##    - ./data/prepped/finalData_12_25_2021.RData
+##    - ./data/prepped/demographics/finalIG.csv
+##    - ./data/prepped/demographics/child_gender_final_merged.csv
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(stringdist)
+require(tidyverse)
+
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+hearings <- read_csv('./data/prepped/hearings/cleaned_docs.csv',col_select = -1)
+finalChildren <- read_csv('./data/prepped/demographics/child_gender_final.csv',col_select = -1)
+
+(toMerge <- hearings %>% select(docID,speaker,year,party,distIDcurr,stab,name,opensecretsID,chamber) %>% 
+    distinct() %>% 
+    mutate(speaker = ifelse(opensecretsID == 'N00003736','Chairman Oxley',speaker)) %>%
+    mutate(lname = tolower(gsub('(Chairman|Mr|Mrs|Ms|Senator)(\\.)* |\\.','',speaker))) %>%
+    select(name,lname,opensecretsID,stab,distIDcurr,chamber,year) %>% distinct() %>%
+    filter(!is.na(stab)))
+
+toMerge <- toMerge  %>%
+  mutate(distSimp = ifelse(chamber == 'Senate',gsub('S\\d','S',distIDcurr),gsub('00','01',distIDcurr)),
+         clname = gsub(' [A-Z] ',' ',gsub('\\.| II$| III$| IV$| V$| VI$| JR\\.$','',name)))
+
+kids <- finalChildren %>%
+  mutate(dist = gsub('CDIR-\\d{4}-\\d{2}-\\d{2}-','',granId)) %>%
+  mutate(chamber = ifelse(grepl('-H-',dist),'House','Senate')) %>%
+  mutate(clname = gsub('\\.| II$| III$| IV$| V$| VI$| JR$','',name)) %>% 
+  mutate(lname = tolower(gsub('^.* ([A-Z])','\\1',clname))) %>% 
+  mutate(dist = gsub('.*?-[A-Z]-','',dist)) %>%
+  mutate(distIDcurr = paste0(stab,sprintf('%02d',as.numeric(ifelse(stab %in% c('DE','VT') & chamber == 'H','1',dist)))),
+         year = as.numeric(str_extract(granId,'\\d{4}')))
+
+# Seems to be a few remaining issues with the kids here. One final manual check required.
+preppedKids <- NULL
+for(i in 1:nrow(toMerge)) {
+  if(toMerge$stab[i] == 'GU') { next }
+  
+  ref <- kids %>%
+    filter(stab == toMerge$stab[i],
+           year <= (toMerge$year[i] + 1) | is.na(year))
+  
+  dists <- stringdist(toMerge$clname[i],
+                      ref$clname)
+  ref <- ref %>%
+    slice(which(dists == min(dists)))
+  
+  ref2 <- ref %>%
+    slice(which.min(toMerge$year[i] - year)) %>% data.frame()
+  
+  if(nrow(ref2) == 0) {
+    ref2 <- ref %>%
+      filter(is.na(year)) %>% distinct()
+  }
+  if(nrow(ref2) != 1) { stop() }    
+  toMerge[i,]
+  preppedKids <- bind_rows(preppedKids,
+                           ref2 %>% select(nKids,nDaughters,nSons,firstDaughter,distIDcurr,year,clname) %>%
+                             mutate(matchName = toMerge$clname[i],
+                                    opensecretsID = toMerge$opensecretsID[i],
+                                    strdist = stringdist(ref2$clname,toMerge$clname[i]),
+                                    matchYear = toMerge$year[i],
+                                    matchDist = toMerge$distIDcurr[i]))
+}
+
+
+write.csv(preppedKids,file = './data/prepped/demographics/kids_to_check_12_25_2021.csv')
+
+
+# Looking up the manually-checked mistakes here
+finalChildren %>%
+  filter(grepl('MURPHY',name)) %>% 
+  select(nKids,nDaughters,nSons,firstDaughter,name,granId) %>% 
+  arrange(name,granId) %>% data.frame()
+kids %>%
+  filter(grepl('McADAMS',name)) %>% 
+  select(nKids,nDaughters,nSons,firstDaughter,name,year,distIDcurr) %>% 
+  arrange(name,year) %>% data.frame()
+
+which(grepl('MURPHY',toMerge$name))
+
+toMerge[377,]
+
+# JB manually fixed some of the issues interacting directly with the .csv file on 
+#   12/25/2021. 
+
+# My god...this data prep...insane
+cleanedKids <- read_csv('./data/prepped/demographics/kids_to_check_12_25_2021_jb_manual.csv')
+
+merged <- hearings %>%
+  left_join(cleanedKids %>%
+              select(nKids,nDaughters,nSons,firstDaughter,opensecretsID,year = matchYear))
+
+# Pretty effing good boys! Just the guy from Guam and we can fix him manually!
+# Only missing one person from Guam. He appears to have two kids, one elder boy and one younger girl. 
+#   https://www.google.com/search?q=michael+san+nicolas+family&sxsrf=AOaemvIgOJOxuaspFg3nt0TvcXYGG_Pn4g:1640444178642&tbm=isch&source=iu&ictx=1&fir=Z4z17LgXOUsSPM%252CK9mwkCgMaczbiM%252C_%253Bs1S5BtHThnpc-M%252CSv6oClCdQzvwUM%252C_%253BtAxHIFNRiwgqdM%252C8nS-13gS-2fO1M%252C_%253BchSSQsY-W-x8hM%252C1XOr3ikihJjSFM%252C_%253BEx0b7kfHJ2hpXM%252C5zW6N29Ju_iIsM%252C_%253B_PXFbYUaEs2vTM%252CK9mwkCgMaczbiM%252C_%253BWswr2Cn3LkJ3oM%252CQN48RBkqPh9arM%252C_%253B-cbIXLp_SUHDpM%252CWnMdMKoGse1dqM%252C_%253BtVWB4PPBUKuW3M%252C2RsWpZtpgsXXEM%252C_%253BKulZUxqpGilyOM%252CQN48RBkqPh9arM%252C_&vet=1&usg=AI4_-kRugmofu5LbbpTxUPDSPTEuS9k17w&sa=X&ved=2ahUKEwiwoKrkmv_0AhXckokEHeJlBlMQ9QF6BAgqEAE#imgrc=s1S5BtHThnpc-M
+merged %>%
+  filter(is.na(nKids),
+         grepl('^N00',opensecretsID))
+
+merged <- merged %>%
+  mutate(nKids = ifelse(opensecretsID == 'N00042619',2,nKids),
+         nDaughters = ifelse(opensecretsID == 'N00042619',1,nDaughters),
+         nSons = ifelse(opensecretsID == 'N00042619',1,nSons),
+         firstDaughter = ifelse(opensecretsID == 'N00042619',0,firstDaughter))
+
+
+# And let's bring in the politician demographics
+demogs <- read_csv('./data/prepped/politicians/politician_prepped_new.csv',col_select = -1)
+
+finalMerge <- merged %>%
+  left_join(demogs) %>%
+  mutate(age = ifelse(opensecretsID == 'FEDGREENSPAN',year - 1926,
+                      ifelse(opensecretsID == 'FEDYELLEN',year - 1946,
+                             ifelse(opensecretsID %in% c('FEDBERNANKE','FEDPOWELL'),year - 1953,
+                                    age))),
+         seniority = ifelse(opensecretsID == 'FEDGREENSPAN',year - 1989,
+                            ifelse(opensecretsID == 'FEDYELLEN',year - 2014,
+                                   ifelse(opensecretsID %in% c('FEDBERNANKE'),year - 2006,
+                                          ifelse(opensecretsID %in% c('FEDPOWELL'),year - 2018,
+                                          seniority)))),
+         nominate_dim1 = ifelse(grepl('FED',opensecretsID),0,nominate_dim1),
+         nominate_dim2 = ifelse(grepl('FED',opensecretsID),0,nominate_dim2))
+
+
+save(finalMerge,file = './data/prepped/finalData_12_25_2021.RData')
+
+
+# Interpolating missing years
+kidsToMerge <- expand.grid(uniqID = unique(paste0(kids$name,kids$dist,kids$stab,kids$chamber)),
+                    year = min(kids$year,na.rm=T):max(kids$year,na.rm=T)) %>%
+  left_join(kids %>% mutate(uniqID = paste0(name,dist,stab,chamber)) %>% select(-granId) %>% distinct()) %>%
+  group_by(uniqID) %>%
+  arrange(year) %>%
+  fill_(c('lname','dist','nKids','nDaughters','nSons','firstDaughter','type','clname','stab','chamber','name','distIDcurr'),.direction = 'updown') %>%
+  ungroup() %>%
+  select(-uniqID) %>%
+  mutate(distIDcurr = ifelse(name == 'CHRISTOPHER S. MURPHY' & year < 2013,'CT05',
+                       ifelse(name == 'CHRISTOPHER S. MURPHY' & year < 2007,'CT16',
+                              ifelse(name == 'WM. LACY CLAY','MO07',
+                                     ifelse(name == 'LANCE GOODEN' & year < 2020,'TX05',distIDcurr)))),
+         chamber = ifelse(name == 'CHRISTOPHER S. MURPHY' & year %in% c(1997:2012),'House',chamber)) %>%
+  mutate(distIDcurr = ifelse(chamber == 'Senate',gsub('0','S',distIDcurr),distIDcurr)) %>%
+  mutate(distSimp = ifelse(chamber == 'Senate',gsub('S\\d','S',distIDcurr),gsub('00','01',distIDcurr)),
+         clname = ifelse(clname == 'FRANK R MASCARA','FRANK MASCARA',
+                         ifelse(clname == 'BRAD J SHERMAN','BRAD SHERMAN',
+                                # ifelse(clname == 'HAROLD E FORD','HAROLD E FORD',
+                                ifelse(clname == 'ROBERT RILEY' & stab == 'AL','BOB RILEY',
+                                       ifelse(clname == 'MELQUIADES (MEL) R MARTINEZ','MEL MARTINEZ',
+                                              ifelse(clname == 'CAROLYN McCARTHY','CAROLYN MCCARTHY',
+                                                     ifelse(clname == 'JOHN H ADLER','JOHN ADLER',
+                                                            ifelse(clname == 'ADAM H PUTNAM','ADAM PUTNAM',
+                                                                   ifelse(clname == 'DANIEL B MAFFEI','DAN MAFFEI',
+                                                                          ifelse(clname == 'CHRISTOPHER JOHN LEE','CHRISTOPHER LEE',
+                                                                                 ifelse(clname == 'PAT TOOMEY','PATRICK TOOMEY',
+                                                                                        ifelse(clname == 'NAN AS HAYWORTH','NAN S HAYWORTH',
+                                                                                               ifelse(clname == 'JIM RENACCI','JAMES RENACCI',
+                                                                                                      ifelse(clname == 'STEPHEN FINCHER','STEPHEN LEE FINCHER',
+                                                                                                             ifelse(clname == 'JOSEPH S DONNELLY','JOE DONNELLY',
+                                                                                                                    ifelse(clname == 'J FRENCH HILL','FRENCH HILL',
+                                                                                                                           ifelse(clname == 'WILLIAM LACY CLAY','WM LACY CLAY',
+                                                                                                                                  ifelse(grepl('JESUS.*GARCIA',clname),'JESUS GARCIA',
+                                                                          gsub(' JR$','',gsub(' [A-Z] ',' ',toupper(clname))))))))))))))))))))) %>%
+  select(-distIDcurr,-name)
+
+kidsToMerge %>%
+  select(-dist) %>%
+  distinct() %>%
+  group_by(clname,distSimp,year) %>%
+  mutate(n=n()) %>% filter(n > 1) %>%
+  arrange(year,clname)
+
+
+(merged <- toMerge %>%
+    mutate(clname = ifelse(clname == "JESUS ``CHUY'' GARCIA",'JESUS GARCIA',
+                           ifelse(grepl('^J.*HIMES$',clname),'JAMES HIMES',clname))) %>%
+    select(-lname) %>%
+    left_join(kidsToMerge))
+
+
+merged %>%
+  group_by(opensecretsID,year) %>%
+  mutate(n=n()) %>% filter(n> 1) %>%
+  data.frame()
+
+write.csv(merged,file = './data/prepped/demographics/child_gender_final_merged.csv')
+
+# Preparing the legislator file
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+textClnr <- function(x) {
+  # x = 'Acevedo-Vilá'
+  # enc2utf8(as(iconv(x,from='UTF-8',to = 'LATIN1'),'character'))
+  # enc2utf8(as(x, "character"))
+  return(stringi::stri_trans_general(str = x, id = "Latin-ASCII"))
+}
+
+legsHist <- read_csv('./data/raw/politicians/legislators-historical.csv')
+legsHist %>%
+  filter(grepl('Linda',first_name))
+
+legsCurr <- read_csv('./data/raw/politicians/legislators-current.csv')
+legsCurr %>%
+  filter(grepl('Linda',first_name)) %>%
+  mutate(last_name = stringi::stri_trans_general(str = last_name, id = "Latin-ASCII"))
+
+legsHist <- legsHist %>%
+  filter(birthday > as.Date('1910-01-01')) %>%
+  mutate(Name = paste0(first_name,' ',last_name),
+         fullNick = paste0(nickname,' ',last_name)) %>%
+  select(Name,full_name,last_name,first_name,gender,type,stab = state,
+         dist = district,fullNick,opensecretsID = opensecrets_id,bioguide_id)
+
+legsCurr <- legsCurr %>%
+  filter(birthday > as.Date('1910-01-01')) %>%
+  mutate(Name = paste0(first_name,' ',last_name),
+         fullNick = paste0(nickname,' ',last_name)) %>%
+  select(Name,full_name,last_name,first_name,gender,type,stab = state,
+         dist = district,fullNick,opensecretsID = opensecrets_id,bioguide_id)
+
+legsFull <- bind_rows(legsCurr,legsHist)
+test <- textClnr(legsFull$last_name)
+test[which(grepl('[^[:alnum:] ]',test))]
+legsFull$lname <- trimws(tolower(test))
+legsFull$Name <- textClnr(legsFull$Name)
+legsFull$full_name <- textClnr(legsFull$full_name)
+legsFull$fullNick <- textClnr(legsFull$fullNick)
+
+for(i in 1:nrow(legsFull)) {
+  legsFull$fullNick[i] <- gsub('^NA',gsub('Sander','Sandy',
+                                          gsub('Gerald','Gerry',
+                                               gsub('Joseph','Joe',
+                                                    gsub('James','Jim',
+                                                         gsub('Marcia','Marcy',
+                                                              gsub('Robert','Bob',
+                                                                   gsub('William','Bill',
+                                                                        gsub('Benjamin','Ben',
+                                                                             gsub('Christopher','Chris',
+                                                                                  gsub('Timothy','Tim',
+                                                                                       gsub('Michael','Mike',
+                                                                                            gsub('Daniel','Dan',
+                                                                                                 gsub('Susan','Sue',legsFull$first_name[i]))))))))))))),
+                               legsFull$fullNick[i])
+}
+
+legsFull <- legsFull %>%
+  mutate(fullNick = ifelse(fullNick == 'Sander Levin','Sandy Levin',
+                           ifelse(fullNick == 'C. Young','Bill Young',fullNick)))
+
+toCheck <- legsFull %>%
+  filter(is.na(opensecretsID))
+
+legsFull <- legsFull %>%
+  filter(!is.na(opensecretsID))
+
+
+# Interest group merge
+IG <- read_csv('./data/prepped/demographics/IG_ratings_new.csv',col_select = -1) %>%
+  mutate(Name = gsub('\\\\xfa','u',gsub('\\\\xf3','o',gsub('\\\\xe1','a',gsub('\\\\xe9','e',utf8::utf8_encode(Name))))))
+  
+
+IG %>%
+  mutate(Name = utf8::utf8_encode(Name)) %>%
+  mutate(inds = row_number()) %>%
+  filter(grepl('\\\\',Name)) %>%
+  group_by(Name) %>%
+  # slice(1) %>%
+  select(Name,inds)
+
+legsFull %>%
+  filter(grepl('Labrador',fullNick))
+
+IG %>%
+  slice(8567)
+
+IGcln <- IG %>%
+  mutate(dist = gsub('Sr|Jr','SEN',gsub('At-Large','1',gsub('.* - (.*)','\\1',Office))),
+         chamber = ifelse(grepl('House',Office),'H',
+                          ifelse(grepl('Senate',Office),'S',NA)),
+         clname = gsub('\\.|,| II$| III$| IV$| V$| VI$| Jr| Sr','',Name)) %>% 
+  mutate(lname = tolower(gsub('^.* ([A-Z])','\\1',clname)),
+         rating = as.numeric(gsub('%','',Rating))) %>%
+  select(lname,stab = State,dist,chamber,year,IG,rating,Name,Office) %>%
+  mutate(uniqID = paste0(lname,stab,dist,chamber))
+
+
+# Matching with opensecretsIDs
+IGclnMatched <- IGcln %>%
+  left_join(legsFull %>% rename(stabLeg = stab,distLeg = dist,chamberLeg = type)) %>% filter(!is.na(opensecretsID))
+
+unmatched <- IGcln %>%
+  left_join(legsFull %>% select(-stab,-dist)) %>% filter(is.na(opensecretsID)) %>%
+  select(-full_name,-gender,-type,-fullNick,-opensecretsID)
+
+
+
+# Preparing the unmatched file
+unmatchedSimp <- unmatched %>% select(Name,stab,dist,chamber,lname) %>% distinct()
+test2 <- textClnr(unmatchedSimp$lname)
+unmatchedSimp[which(grepl('[^[:alnum:] ]',test2)),]
+unmatchedSimp$lname <- trimws(tolower(test2))
+unmatchedSimp$Name <- textClnr(unmatchedSimp$Name)
+# install.packages("stringdist")
+
+
+
+cands <- NULL
+for(cyc in seq(2000,2020,by = 2)) {
+  if(cyc == 2022) { next }
+  cands <- bind_rows(cands,as_tibble(read.delim(paste0('./data/raw/donations/cands',substr(as.character(cyc),3,4),'.txt'),
+                                                col.names = c('cycle','fecID','opensecretsID','FirstLastP','party','distIDrunfor','distIDcurr',
+                                                              'currCand','CycleCand','CRPICO','RecipCode','NoPacs'),sep = ',',quote = '|')))
+  
+}
+
+cands <- cands %>%
+  mutate(stab = substr(distIDcurr,1,2),
+         name = toupper(gsub(' \\(.*','',FirstLastP)))
+
+cands$lname <- sapply(str_split(gsub(' (JR|SR|I(I+|V)*)$','',
+                                     gsub('\\.','',cands$name)),' '),
+                    function(x) tail(x,1))
+
+lookup <- NULL
+for(i in 1:nrow(toCheck)) {
+  chamb <- toCheck$type[i]
+  state <- toCheck$stab[i]
+  if(chamb == 'sen') {
+    ref <- cands %>%
+      filter(substr(distIDcurr,3,3) == 'S') %>%
+      select(opensecretsID,FirstLastP,party,distIDcurr,stab,name,lname) %>%
+      distinct()
+  } else {
+    ref <- cands%>%
+      filter(grepl('\\d',substr(distIDcurr,3,3) )) %>%
+      select(opensecretsID,FirstLastP,party,distIDcurr,stab,name,lname) %>%
+      distinct()
+  }
+  ref <- ref %>%
+    filter(lname == toupper(toCheck$last_name[i]))
+  if(nrow(ref) == 0) { next }
+  if(!is.na(state)) {
+    ref <- ref %>%
+      filter(stab == state)
+  }
+  if(nrow(ref) == 0) { next }
+  dists <- stringdist(toupper(toCheck$Name[i]),ref$name)
+  ref <- ref[which(dists == min(dists)),]
+  ref$toCheckName <- toCheck$Name[i]
+  ref$dist <- dists[which.min(dists)]
+  lookup <- bind_rows(lookup,ref)
+  cat(i,'\n')
+}
+
+lookup %>%
+  select(toCheckName,name,dist,opensecretsID) %>%
+  data.frame() %>%
+  filter(dist > 0) %>%
+  arrange(-dist)
+
+drops <- c('N00030198',
+           'N00030267',
+           'N00002299',
+           'N00000308',
+           'N00002383',
+           'N00001148',
+           'N00001261',
+           'N00003535',
+           'N00001276',
+           'N00000423',
+           'N00007390',
+           'N00035504',
+           'N00027623',
+           'N00005090',
+           'N00036107',
+           'N00024919',
+           'N00000684',
+           'N00003762',
+           'N00031390',
+           'N00004884',
+           'N00012233',
+           'N00002793',
+           'N00042240',
+           'N00027848',
+           'N00038601',
+           'N00009954',
+           'N00007879',
+           'N00007232',
+           'N00006983',
+           'N00030682',
+           'N00004698',
+           'N00005645',
+           'N00024992',
+           'N00007068',
+           'N00007833')
+
+lookup <- lookup %>%
+  filter(!opensecretsID %in% drops)
+
+legsFull <- bind_rows(legsFull,
+                      toCheck %>%
+                        select(-opensecretsID) %>%
+                        left_join(lookup %>% select(Name = toCheckName,
+                                                    opensecretsID)))
+
+unmatchedFixed <- missing <- NULL
+for(i in 1:nrow(unmatchedSimp)) {
+  # i = 133
+  # Sys.sleep(1)
+  minDists <- mins <- NULL
+  # unmatchedSimp[i,]
+  cat(i,': ',unmatchedSimp$Name[i],': ')
+  lnm <- gsub('<U+653C><U+3E39>|?\u0094?㸹','e',gsub('?\u0094?㸱','a',iconv(unmatchedSimp$lname[i], "latin1", "UTF-8",sub='')))
+  
+  if(!is.na(unmatchedSimp$stab[i])) {
+    toCheckIn <- legsFull %>%
+      filter(tolower(lname) == lnm & stab == unmatchedSimp$stab[i])
+  } else {
+    toCheckIn <- legsFull %>%
+      filter(tolower(lname) == lnm)
+  }
+  if(nrow(toCheckIn) == 0) { 
+    toCheckIn <- legsFull %>%
+      filter(grepl(lnm,tolower(lname)))
+  } 
+  if(nrow(toCheckIn) == 0) {
+    missing <- c(missing,i)
+    next()
+  }
+  nm <- iconv(unmatchedSimp$Name[i], "latin1", "UTF-8",sub='')
+  
+  dists <- stringdist(nm,toCheckIn$Name)
+  mins <- c(mins,which.min(dists))
+  minDists <- c(minDists,dists[which.min(dists)])
+  dists <- stringdist(nm,toCheckIn$full_name)
+  mins <- c(mins,which.min(dists))
+  minDists <- c(minDists,dists[which.min(dists)])
+  dists <- stringdist(nm,toCheckIn$fullNick)
+  mins <- c(mins,which.min(dists))
+  minDists <- c(minDists,dists[which.min(dists)])
+  
+  # if(i == 35) { stop() }
+  mind <- mins[which.min(minDists)]
+  tmp <- cbind(unmatchedSimp[i,],toCheckIn[mind,] %>% rename(NameLeg = Name,
+                                                             lnameLeg = lname,
+                                                        stabLeg = stab,
+                                                        distLeg = dist,
+                                                        chamberLeg = type) %>% mutate(matchDist = minDists[which.min(minDists)],
+                                                                                                   matchName = NameLeg))
+  unmatchedFixed <- bind_rows(unmatchedFixed,tmp)
+  cat(toCheckIn$Name[mind],":",minDists[which.min(minDists)],'\n')
+}
+
+
+as_tibble(unmatchedFixed) %>%
+  select(Name,matchName,matchDist) %>%
+  arrange(-matchDist) %>%
+  filter(matchDist > 0) %>%
+  data.frame()
+
+unmatchedSimp %>%
+  filter(grepl('Christopher Cox',Name))
+
+legsFull %>%
+  filter(grepl('John Cox',Name))
+
+write.csv(as_tibble(unmatchedFixed) %>%
+            select(Name,matchName,matchDist,opensecretsID) %>%
+            filter(matchDist > 0) %>% distinct(),file = './data/prepped/demographics/IG_toclean.csv')
+
+
+# Manual checking
+legsFull %>%
+  filter(grepl('Williams',Name)) %>% data.frame()
+
+
+cleaned <- read_csv('./data/prepped/demographics/IG_toclean_JBchecked.csv')
+cleaned <- cleaned %>%
+  select(Name,matchName,opensecretsID) %>%
+  left_join(legsFull %>% select(matchName = Name,opensecretsID,gender,type,stab,dist) %>% distinct())
+
+
+as_tibble(unmatchedFixed) %>%
+  filter(matchDist > 0) %>%
+  select(-opensecretsID,-gender,-matches('Leg$')) %>%
+  left_join(cleaned %>% select(-matchName) %>%
+              rename(chamberLeg = type,stabLeg = stab,distLeg = dist)) %>%
+  filter(is.na(chamberLeg))
+
+fixed <- as_tibble(unmatchedFixed) %>% 
+  filter(matchDist == 0) %>%
+  bind_rows(as_tibble(unmatchedFixed) %>%
+              filter(matchDist > 0) %>%
+              select(-opensecretsID,-gender,-matches('Leg$')) %>%
+              left_join(cleaned %>% select(-matchName) %>%
+                          rename(chamberLeg = type,stabLeg = stab,distLeg = dist)))
+
+fixed <- unmatched %>%
+  select(stab,dist,chamber,year,IG,rating,Name) %>%
+  mutate(Name = textClnr(Name)) %>%
+  left_join(fixed)
+
+
+IGfinal <- IGclnMatched %>%
+  bind_rows(fixed) %>%
+  select(opensecretsID,year,IG,rating,Name,stab,dist,chamber,stabLeg,distLeg,chamberLeg)# %>% distinct()
+
+IGfinal <- IGfinal %>%
+  mutate(distLeg = ifelse(chamberLeg == 'sen','SEN',
+                          ifelse(distLeg == '0','1',distLeg)),
+         dist = ifelse(dist == 'Delegate' & stab %in% c('DC','AS','MP','VI','GU'),'1',dist),
+         chamberLeg = ifelse(chamberLeg == 'rep','H',
+                             ifelse(chamberLeg == 'sen','S',chamberLeg))) 
+IGfinal %>%
+  filter(stab != stabLeg) %>%
+  group_by_at(vars(opensecretsID,Name,matches('stab|dist|chamber'))) %>%
+  summarise(n=n()) %>% data.frame()
+
+IGcln <- expand.grid(year = 1995:2021,
+                     opensecretsID = unique(IGfinal$opensecretsID)) %>%
+  left_join(IGfinal) %>%
+  group_by(opensecretsID) %>%
+  arrange(year) %>%
+  fill_(c('IG','rating','Name','stab','dist','chamber','stabLeg','distLeg','chamberLeg'),.direction = 'updown')
+
+
+# 18 people in the hearings are not rated by interest groups
+toMerge %>%
+  left_join(IGcln %>% select(year,opensecretsID,IG,rating,Name),by = c('opensecretsID','year')) %>%
+  filter(is.na(rating)) %>%
+  select(lname,opensecretsID) %>% distinct() %>% data.frame()
+
+# Final dat to use
+finalIG <- toMerge %>%
+  left_join(IGcln %>% select(year,opensecretsID,IG,rating,Name),by = c('opensecretsID','year'))
+
+write.csv(finalIG,file = './data/prepped/demographics/finalIG.csv')
+
+
+
+
+# Final children cleaning part DEUX
+# Final Cleaning part deux!
+children <- read_csv('./data/prepped/demographics/child_gender_final_merged.csv')
+
+children %>%
+  group_by(opensecretsID,year) %>%
+  summarise(n=n()) %>%
+  arrange(-n) %>%
+  filter(n > 1) %>%
+  select(opensecretsID) %>% distinct() %>%
+  data.frame()
+
+children %>%
+  filter(opensecretsID == 'N00037161') %>% data.frame()
+
+drops <- children %>%
+  filter(opensecretsID == 'N00003758' & clname == 'ANDRE CARSON' |
+         opensecretsID == 'N00002097' & clname == 'JOHN W WARNER'|
+         opensecretsID == 'N00012508' & clname == 'THOMAS R CARPER' |
+         opensecretsID == 'N00026914' & grepl('GWENDOLYNNE ',clname) |
+         opensecretsID == 'N00005301' & type == 'manual' | 
+         opensecretsID == 'N00006008' & clname == 'RUBEN HINOJOSA' |
+         opensecretsID == 'N00009954' & clname == 'JOHN H CHAFEE' |
+         opensecretsID == 'N00024871' & nKids == 0 |
+         opensecretsID == 'N00029513' & clname == 'JULY CARSON')
+
+
+
+children <- children %>%
+  filter(!`...1` %in% drops$...1) %>%
+  select(-`...1`,-matches('name|type')) %>%
+  group_by(opensecretsID,stab,distIDcurr,chamber,year) %>%
+  summarise_all(max,na.rm=T)
+
+children %>%
+  group_by(opensecretsID,year,distIDcurr) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  filter(n > 1) %>%
+  arrange(opensecretsID,year) %>%
+  group_by(opensecretsID,year) %>%
+  summarise(varKids = var(nKids)) %>%
+  ungroup() %>%
+  filter(varKids > 0)
+
+children %>%
+  filter(opensecretsID == 'N00004118')
+
+
+write.csv(children,file = './data/prepped/demographics/child_gender_final_merged_cleaned.csv')
+
+# EOF
+```
+
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script prepares and cleans the data on children gender.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/raw/demographics/demographics.csv: Prepped data from 0_DATA_demographics_scraper.R (not run as part of replication)
+##    - ./data/prepped/demographics/toCheck_kids_jbmanual.csv: Manually prepared data from an output of this script (./data/prepped/demographics/toCheck_kids.csv)
+##    - ./data/prepped/demographics/manual_children_AK_JB_NF.csv: Manually prepared data from an output of this script (./data/prepped/demographics/toCheck_kids_hard_ones.csv)
+##    - ./data/prepped/demographics/demographics_clean.csv: Saved intermediate file from this script 
+##  - Outputs:
+##    - ./data/prepped/demographics/demographics_clean.csv
+##    - ./data/prepped/demographics/toCheck_kids.csv
+##    - ./data/prepped/demographics/toCheck_kids_hard_ones.csv
+##    - ./data/prepped/demographics/child_gender_final.csv
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(gender)
+require(tidyverse)
+
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+# Load demographic data generated by 0_DATA_demographics_scraper.R
+children <- read_csv('./data/raw/demographics/demographics.csv')
+
+kidsGender <- NULL
+for(i in 1:length(unique(children$child))) {
+  unique(children$child)[i]
+  kids <- gsub(' .*','',trimws(str_split(gsub('[A-Z]\\.|Jr\\.,|;','',gsub(';.*|Governor','',gsub('\\[\\[Page \\d+\\]\\]',' ',unique(children$child)[i]))),',| and ')[[1]]))
+  if(any(grepl('Congress|House|Senat',kids))) { stop() }
+  if(is.na(kids[1])) { next }
+  if(any(kids == '')) {
+    kids <- kids[-which(kids == '')]
+  }
+  tmp <- gender(kids)
+  nKids <- length(kids)
+  nDaughters <- nrow(tmp %>% filter(gender == 'female'))
+  nSons <- nrow(tmp %>% filter(gender == 'male'))
+  firstDaughter <- nrow(tmp %>% filter(name == kids[1],gender == 'female'))
+  kidsGender <- bind_rows(kidsGender,as_tibble(data.frame(id = unique(children$child)[i],
+                       nKids = nKids,nDaughters = nDaughters,nSons = nSons,firstDaughter = firstDaughter)))
+  cat(kids,':',nKids,':',nDaughters,'\n')
+}
+
+finalChildren <- children %>%
+  left_join(kidsGender,by = c('child' = 'id')) %>%
+  select(-`...1`)
+
+write.csv(finalChildren,file = './data/prepped/demographics/demographics_clean.csv')
+
+
+# Continued spot checking
+toCheck <- finalChildren %>%
+  mutate(nKidsCheck = nDaughters + nSons) %>%
+  filter(nKids != nKidsCheck | (is.na(child) & !is.na(fam))) %>%
+  select(fam,child) %>% distinct()
+
+write.csv(toCheck,file = './data/prepped/demographics/toCheck_kids.csv')
+
+# Manually checked version, but there is still more to do
+checked <- read_csv('./data/prepped/demographics/toCheck_kids_jbmanual.csv')
+
+toCheck2 <- finalChildren %>% select(name,granId,fam,child) %>%
+  left_join(checked %>% filter(DK == 1)) %>%
+  filter(DK == 1) %>%
+  select(name,granId) %>% distinct()
+
+data.frame(t(as.matrix(unlist(str_split(gsub('CDIR-\\d{4}-\\d{2}-\\d{2}-','',toCheck2$granId[1:3]),'-')))))
+
+toCheck2 <- toCheck2 %>%
+  mutate(dist = gsub('CDIR-\\d{4}-\\d{2}-\\d{2}-','',granId)) %>%
+  mutate(stab = substr(dist,1,2)) %>%
+  mutate(dist = gsub('[A-Z]{2}-','',dist)) %>%
+  select(name,stab,dist) %>% distinct() %>%
+  group_by(name,stab) %>%
+  summarise(dist = paste(dist,collapse = ', '),.groups = 'drop')
+
+# Let's divide and conquer with the coauthors
+write.csv(toCheck2,file = './data/prepped/demographics/toCheck_kids_hard_ones.csv')
+
+
+# Final build
+collab_checked <- read_csv('./data/prepped/demographics/manual_children_AK_JB_NF.csv')
+jb_checked <- read_csv('./data/prepped/demographics/toCheck_kids_jbmanual.csv') %>%
+  rename(X1 = `...1`)
+full <- read_csv('./data/prepped/demographics/demographics_clean.csv') %>%
+  rename(X1 = `...1`)
+
+collab_cleaned <- NULL
+for(i in 1:nrow(collab_checked)) {
+  tmp <- str_split(collab_checked$dist[i],', ')[[1]]
+  for(j in 1:length(tmp)) {
+    collab_cleaned <- bind_rows(collab_cleaned,collab_checked[i,] %>% mutate(dist = tmp[j]))
+  }
+}
+  
+toMerge <- jb_checked %>%
+  filter(is.na(DK)) %>%
+  left_join(full %>% select(name,granId,fam,child)) %>%
+  mutate(dist = gsub('CDIR-\\d{4}-\\d{2}-\\d{2}-','',granId)) %>%
+  mutate(stab = substr(dist,1,2)) %>%
+  mutate(dist = gsub('[A-Z]{2}-','',dist)) %>%
+  select(-X1,-DK,-fam,-child) %>% distinct() %>%
+  mutate(uniqID = paste0(name,dist,stab))
+
+toMerge %>%
+  mutate(year = as.numeric(str_extract(granId,'\\d{4}'))) %>%
+  filter(grepl('FORTNEY',name)) %>%
+  select(nKids,name,granId,year) %>%
+  arrange(year)
+
+collab_cleaned <- collab_cleaned %>%
+  mutate(uniqID = paste0(name,dist,stab))
+
+toMerge <- bind_rows(toMerge %>% filter(!uniqID %in% collab_cleaned$uniqID),
+          collab_cleaned %>%
+            mutate_at(vars(matches('^n(Kids|Daughters|Sons)|^first')),function(x) as.numeric(x)) %>%
+            select(-Coder,-Comments,-X,-Source,-matches('12|13|14')))
+
+
+fullTmp <- full %>% 
+  mutate(dist = gsub('CDIR-\\d{4}-\\d{2}-\\d{2}-','',granId)) %>%
+  mutate(stab = substr(dist,1,2)) %>%
+  mutate(dist = gsub('[A-Z]{2}-','',dist)) %>%
+  mutate(uniqID = paste0(name,dist,stab))
+
+
+toMerge <- toMerge %>%
+  left_join(fullTmp %>%
+  select(granId,uniqID))
+
+final <- fullTmp %>%
+  filter(!uniqID %in% toMerge$uniqID) %>%
+  select(colnames(toMerge)) %>%
+  mutate(type = 'automated') %>%
+  bind_rows(toMerge %>% mutate(type = 'manual')) %>%
+  select(-uniqID) %>%
+  mutate_at(vars(matches('n(Kids|Sons)|Daughter')),function(x) ifelse(is.na(x),0,x))
+
+final %>%
+  mutate(year = as.numeric(str_extract(granId,'\\d{4}'))) %>%
+  select(-granId) %>%
+  distinct() %>%
+  group_by(name,dist,stab,year) %>%
+  mutate(n=n()) %>%
+  filter(n > 1) %>%
+  arrange(year,name)
+
+write.csv(final,file = './data/prepped/demographics/child_gender_final.csv')
+
+
+# EOF
+```
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script prepares the bills which pertain to votes to constrain the FED.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/raw/bills/congressional bills 1947-2016 (with audit for bisbee).dta: Replication data provided by Binder
+##    - ./data/raw/politicians/new_legs_lookup_full.csv: Raw data from Raw data from https://github.com/unitedstates/congress-legislators, manually prepared by Bisbee
+##    - ./data/prepped/hearings/cleaned_docs.csv: Prepped data from 1_DATA_hearings_prep.R
+##  - Outputs:
+##    - ./data/prepped/bills/binder_bills_merged.RData
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(tidyverse)
+require(jsonlite)
+require(utils)
+require(xml2)
+
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+# Starting with Binder's bills
+bills <- haven::read_dta('./data/raw/bills/congressional bills 1947-2016 (with audit for bisbee).dta')
+idlookupFull <- read_csv('./data/raw/politicians/new_legs_lookup_full.csv',col_select = -1)
+
+
+bills$lname <- NA
+for(i in 1:nrow(bills)) {
+  bills$lname[i] <- gsub('.*? |,','',str_extract(bills$name[i],'.*?,'))
+}
+
+bills <- bills %>%
+  mutate(Party = ifelse(party == 200,'GOP',
+                        ifelse(party == 100,'DEM','IND')))
+
+statelookup <- data.frame(statenm = substr(toupper(state.name),1,7),
+                          stab = state.abb)
+
+bills <- bills %>%
+  mutate(statenm = gsub('OAKLAH','OKLAHO',
+                        gsub('DELEWA','DELAWA',substr(statenm,1,7)))) %>%
+  left_join(statelookup)
+
+# What a huge pain to merge these...easiest is probably to get opensecretsIDs for each?
+toMatch <- bills %>%
+  select(name,lname,idno,Party,stab,year,district) %>%
+  distinct() %>%
+  filter(year > 1990) %>%
+  mutate(district = ifelse(is.na(district),0,district)) %>%
+  mutate(district = ifelse(stab == 'DE',1,district)) %>%
+  mutate(Party = ifelse(lname == 'Bachus','GOP',Party),
+         Party = ifelse(lname == 'Grimm','GOP',Party),
+         Party = ifelse(lname == 'Hagan','DEM',Party),
+         Party = ifelse(lname == 'Manchin','DEM',Party),
+         Party = ifelse(lname == 'Sanders','IND',Party),
+         Party = ifelse(lname == 'Sherman','DEM',Party),
+         Party = ifelse(lname == 'Brady' & stab == 'TX','GOP',Party),
+         Party = ifelse(lname == 'King' & stab == 'ME','IND',Party),
+         stab = ifelse(lname == 'DeMint','SC',stab),
+         stab = ifelse(lname == 'Sherman','CA',stab),
+         stab = ifelse(lname == 'Hagan','NC',stab),
+         stab = ifelse(lname == 'McHenry','NC',stab),
+         stab = ifelse(lname == 'Merkley','OR',stab),
+         stab = ifelse(lname == 'Pittenger','NC',stab),
+         stab = ifelse(lname == 'Rounds','SD',stab),
+         stab = ifelse(lname == 'Kanjorski','PA',stab),
+         stab = ifelse(lname == 'Lankford' & year == 2014,'OK',stab),
+         stab = ifelse(lname == 'Johnson' & year == 2007 & district == 30,'TX',stab),
+         stab = ifelse(lname == 'Kucinich' & year == 2008 & district == 10,'OH',stab),
+         stab = ifelse(lname == 'LaTourette' & year == 2008 & district == 19,'OH',stab),
+         stab = ifelse(lname == 'Nethercutt' & year == 2004 & district == 5,'WA',stab),
+         stab = ifelse(lname == 'Johanns' & year == 2013,'NE',stab),
+         stab = ifelse(lname == 'Ross' & year == 2006 & district == 4,'AR',stab),
+         district = ifelse(lname == 'Dreier' & stab == 'CA' & year == 2008,
+                           26,district),
+         district = ifelse(lname == 'Grimm' & stab == 'NY' & year == 2012,
+                           13,district),
+         district = ifelse(lname == 'Kennedy' & stab == 'MN' & year == 2005,
+                           6,district),
+         district = ifelse(lname == 'LaFalce' & stab == 'NY' & year %in% 2000:2001,
+                           29,district),
+         district = ifelse(lname == 'LaTourette' & stab == 'OH' & year %in% 2008,
+                           14,district),
+         district = ifelse(lname == 'Posey' & stab == 'FL' & year %in% 2009:2013,
+                           15,district),
+         district = ifelse(lname == 'Renacci' & stab == 'OH' & year %in% 2011:2019,
+                           16,district),
+         district = ifelse(lname == 'Schweikert' & stab == 'AZ' & year %in% 2011:2013,
+                           5,district),
+         district = ifelse(lname == 'Speier' & stab == 'CA' & year %in% 2008:2013,
+                           12,district),
+         district = ifelse(lname == 'Sanders' & stab == 'VT' & year %in% 2009:2015,
+                           1,district),
+         district = ifelse(lname == 'Dorgan' & stab == 'ND',
+                           1,district),
+         district = ifelse(lname == 'Lankford' & year %in% 2014:2015,
+                           5,district)) %>%
+  distinct() %>%
+  mutate(district = ifelse(is.na(district),0,district)) %>%
+  drop_na(stab)
+
+toMatch %>%
+  filter(lname == 'Johanns')
+
+
+idlookupFull %>%
+  filter(first == 'Mike',
+         last == 'Johanns') %>%
+  count(first,last,opensecrets) %>%
+  print(n = 22)
+
+bills %>%
+  filter(lname == 'Johanns') %>%
+  select(name,lname,stab,district,party,year)
+
+idlookupFull %>%
+  select(opensecretsID = opensecrets,year,
+         first,lname = last,party,district,stab = state,fname = first) %>%
+  mutate(lname = gsub('\\\\xfa','u',gsub('\\\\xf3','o',gsub('\\\\xe1','a',gsub('\\\\xe9','e',utf8::utf8_encode(lname)))))) %>%
+  filter(lname == 'Johanns')
+
+idLookupMerge <- idlookupFull %>%
+  select(opensecretsID = opensecrets,year,
+         first,lname = last,party,district,stab = state,fname = first) %>%
+  mutate(lname = gsub('\\\\xfa','u',gsub('\\\\xf3','o',gsub('\\\\xe1','a',gsub('\\\\xe9','e',utf8::utf8_encode(lname)))))) %>%
+  mutate(opensecretsID = ifelse(lname == 'LaFalce' & stab == 'NY','N00001305',opensecretsID),
+         opensecretsID = ifelse(lname == 'Roukema' & stab == 'NJ','N00000740',opensecretsID),
+         opensecretsID = ifelse(lname == 'Gonzalez' & stab == 'TX' & fname == 'Henry','N00005961',opensecretsID),
+         opensecretsID = ifelse(lname == 'Hamilton' & stab == 'IN' & fname == 'Lee','N00003887',opensecretsID),
+         opensecretsID = ifelse(lname == 'Kassebaum' & stab == 'KS','N00005258',opensecretsID),
+         opensecretsID = ifelse(lname == 'Metcalf' & fname == 'Jack','N00007895',opensecretsID),
+         # opensecretsID = ifelse(lname == 'Johanns' & fname == 'Mike','N00029444',opensecretsID),
+         opensecretsID = ifelse(lname == 'Campbell' & fname == 'Tom' & stab == 'CA','N00007377',opensecretsID)) %>%
+  drop_na(opensecretsID) %>%
+  mutate(Party = ifelse(party == 'Republican','GOP',
+                        ifelse(party == 'Democrat','DEM','IND'))) %>%
+  distinct() %>%
+  mutate(district = ifelse(is.na(district),0,district)) %>%
+  mutate(district = ifelse(stab %in% c('DE','VT','ND'),1,district))
+
+# Some issues with the 90s, but only 8, and i'm not going to sweat it
+toMatch %>%
+  left_join(idLookupMerge) %>%
+  filter(is.na(opensecretsID)) %>%
+  arrange(lname) %>%
+  print(n = 22)
+
+idLookupMerge %>%
+  filter(lname == 'Johanns')
+
+# Ok so we are just redoing tons of work here, but at least we have a merge (again)
+toMatch <- toMatch %>%
+  left_join(idLookupMerge)
+
+toMatch %>%
+  filter(lname == 'Johanns')
+
+bills %>%
+  select(name,lname,idno,Party,stab,year) %>%
+  left_join(toMatch) %>%
+  filter(!is.na(opensecretsID))
+
+hearings <- read_csv('./data/prepped/hearings/cleaned_docs.csv') %>%
+  select(-`...1`) %>%
+  mutate(X1 = row_number()) 
+
+tosearch <- hearings %>%
+  select(speaker,opensecretsID,nameHearings = name) %>%
+  distinct() %>%
+  left_join(toMatch %>%
+              select(opensecretsID,name) %>%
+              distinct() %>%
+              drop_na(opensecretsID)) %>%
+  filter(is.na(name)) %>%
+  filter(!grepl('FED',opensecretsID)) %>%
+  count(speaker,nameHearings) %>%
+  mutate(lname = gsub('^.* |\\.','',speaker))
+
+tosearch %>%
+  print(n = 163)
+  
+missingToMatch <- NULL
+for(i in 1:nrow(tosearch)) {
+  test <- toMatch %>%
+  filter(grepl(tosearch$lname[i],name))
+  if(nrow(test) > 0) {
+    missingToMatch <- missingToMatch %>%
+      bind_rows(test %>%
+                  select(name,Party,stab) %>%
+                  distinct() %>% 
+                  bind_cols(tosearch %>% slice(i)))
+  }
+}
+
+# Ok...no issues here. But what about with the full bills data?
+missingToMatch %>%
+  print(n = 40)
+
+
+missingBills <- NULL
+for(i in 1:nrow(tosearch)) {
+  test <- bills %>%
+    filter(grepl(tosearch$lname[i],name))
+  if(nrow(test) > 0) {
+    missingBills <- missingBills %>%
+      bind_rows(test %>%
+                  select(name,Party,stab) %>%
+                  distinct() %>% 
+                  bind_cols(tosearch %>% slice(i)))
+  }
+}
+
+# Issue with Mike Johanns...just want to add him to the to match object
+missingBills %>%
+  print(n = 53)
+
+# Okay...so we now (theoretically) have all the people at these hearings who also 
+#   sponsored one of the bills merged. Of the 157 who aren't merged, we just assume
+#   that they didn't sponsor one of these bills from the Binder data.
+tosearch %>%
+  count(lname)
+
+# Have 477 bills that these politicians sponsored
+preppedBills <- bills %>%
+  select(name,lname,idno,year,stab,district,Party,empower,centralize,oversight,addirects,constrain,decentralize,independence,regulatory,monetary,audit,lname) %>% 
+  left_join(toMatch %>%
+              select(name,lname,idno,Party,stab,opensecretsID) %>%
+              distinct()) %>%
+  drop_na(opensecretsID) %>%
+  select(-name,-lname,-idno,-year,-stab,-district,-Party) %>%
+  gather(billType,vote,-opensecretsID) %>%
+  group_by(opensecretsID,billType) %>%
+  summarise(totSpons = sum(vote,na.rm=T),
+            totBills = sum(!is.na(vote)),
+            meanSpons = mean(vote,na.rm=T)) %>%
+  ungroup() %>%
+  filter(totBills > 0) %>%
+  pivot_wider(names_from = 'billType',
+              values_from = c('totSpons','totBills','meanSpons'))
+  
+# Corresponds to 195 people, although lots of these types of bills are missing data.
+sapply(preppedBills,function(x) length(which(is.na(x))))
+
+
+
+# Probably the easiest is to just dummy these. Did a politician ever sponsor a bill
+#   calling to audit the FED?
+finalBills <- hearings %>%
+  select(opensecretsID,party) %>%
+  distinct() %>%
+  left_join(preppedBills %>%
+              mutate(anyBill = 1)) %>%
+  drop_na(opensecretsID) %>%
+  mutate(constrain_empower_tot = totSpons_constrain - totSpons_empower,
+         cent_decent_tot = totSpons_centralize - totSpons_decentralize,
+         oversight_indep_tot = totSpons_oversight - totSpons_independence) %>%
+  select(opensecretsID,matches('_tot$'),anyBill) %>%
+  mutate_at(vars(-opensecretsID),function(x) ifelse(is.na(x),0,x))
+
+
+save(finalBills,file = './data/prepped/bills/binder_bills_merged.RData')
+```
+
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script prepares the final data for NLP scripts.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/prepped/finalData_12_25_2021.RData: Prepped data from 1_DATA_merge.R
+##    - ./data/prepped/bills/binder_bills_merged.RData: Prepped data from 5_DATA_bill_prep.R
+##    - ./data/raw/politicians/Yellen_vote.csv: Raw data from https://www.senate.gov/legislative/LIS/roll_call_lists/roll_call_vote_cfm.cfm?congress=117&session=1&vote=00006
+##  - Outputs:
+##    - ./data/prepped/finalData_for_NLP.RData
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(tidyverse)
+
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+# -------------------------------------------------------------- Loading data
+load('./data/prepped/finalData_12_25_2021.RData')
+# Binder bill data: binder_bills_merged.RData created by /Data/Bills/bill_prep.R
+load('./data/prepped/bills/binder_bills_merged.RData')
+
+# Yellen nomination vote data: Yellen_vote.csv from https://www.senate.gov/legislative/LIS/roll_call_lists/roll_call_vote_cfm.cfm?congress=117&session=1&vote=00006
+vote <- read_csv('./data/raw/politicians/Yellen_vote.csv',
+                 col_names = c('speaker','Party','stab','yellen_vote'))
+
+
+# Cleaning the data further.
+finalMerge <- finalMerge %>%
+  mutate(fullInd = row_number(),
+         textclean = trimws(gsub('\\s{2,}',' ',gsub('\\\r|\\\n',' ',gsub('\\\n\\s{3,}[[:upper:]]{2,}.*\\\r','',textclean))))) %>%
+  mutate(nchars = nchar(textclean))
+
+# Filling in missing demographic data
+finalMerge %>%
+  select(opensecretsID,gender,party,nominate_dim1,age,seniority) %>%
+  filter(!is.na(opensecretsID),
+         !complete.cases(.)) %>% distinct()
+
+finalMerge$party[which(is.na(finalMerge$party))] <- finalMerge$position[which(is.na(finalMerge$party))]
+
+finalMerge <- finalMerge %>%
+  mutate(gender = ifelse(opensecretsID %in% c('FEDGREENSPAN',
+                                              'FEDBERNANKE',
+                                              'FEDPOWELL'),'M',
+                         ifelse(opensecretsID == 'FEDYELLEN','F',gender)))
+
+finalMerge <- finalMerge %>% filter(opensecretsID != 'ADMIN')
+
+finalMerge %>%
+  select(opensecretsID,stab,gender,party,nominate_dim1,
+         votepct_rel,votepct,nKids,nDaughters,nSons,firstDaughter) %>%
+  filter(!is.na(opensecretsID),
+         !complete.cases(.)) %>% distinct() 
+
+
+
+finalMerge <- finalMerge %>%
+  mutate(votepct = ifelse(opensecretsID == 'N00042619',.549,
+                          ifelse(grepl('FED|EXPERT',opensecretsID),1,votepct)),
+         votepct_rel = ifelse(opensecretsID == 'N00042619',.549-.44,
+                              ifelse(grepl('FED|EXPERT',opensecretsID),1,votepct_rel)),
+         stab = ifelse(grepl('FED|EXPERT',opensecretsID),'DC',stab)) # https://ballotpedia.org/Michael_F.Q._San_Nicolas
+
+finalMerge <- finalMerge %>%
+  mutate(nKids = ifelse(opensecretsID == 'FEDPOWELL',3,
+                        ifelse(opensecretsID == 'FEDBERNANKE',2,
+                               ifelse(opensecretsID == 'FEDGREENSPAN',0,
+                                      ifelse(opensecretsID == 'FEDYELLEN',1,
+                                             ifelse(opensecretsID == 'EXPERTKOHN',2,
+                                                    ifelse(opensecretsID == 'EXPERTKOO',2,
+                                                           ifelse(opensecretsID == 'EXPERTMELTZER',2,
+                                                                  ifelse(opensecretsID == 'EXPERTTAYLOR',2,
+                                                                         ifelse(opensecretsID == 'EXPERTMCCLOSKEY',2,
+                                                                                ifelse(grepl('EXPERT',opensecretsID),0,nKids)))))))))),
+         nDaughters = ifelse(opensecretsID == 'FEDPOWELL',2,
+                             ifelse(opensecretsID == 'FEDBERNANKE',0,
+                                    ifelse(opensecretsID == 'FEDGREENSPAN',0,
+                                           ifelse(opensecretsID == 'FEDYELLEN',0,
+                                                  ifelse(opensecretsID == 'EXPERTKOHN',1,
+                                                         ifelse(opensecretsID == 'EXPERTKOO',0,
+                                                                ifelse(opensecretsID == 'EXPERTMELTZER',0,
+                                                                       ifelse(opensecretsID == 'EXPERTTAYLOR',1,
+                                                                              ifelse(opensecretsID == 'EXPERTMCCLOSKEY',1,
+                                                                                     ifelse(grepl('EXPERT',opensecretsID),0,nDaughters)))))))))),
+         nSons = ifelse(opensecretsID == 'FEDPOWELL',1,
+                        ifelse(opensecretsID == 'FEDBERNANKE',2,
+                               ifelse(opensecretsID == 'FEDGREENSPAN',0,
+                                      ifelse(opensecretsID == 'FEDYELLEN',1,
+                                             ifelse(opensecretsID == 'EXPERTKOHN',1,
+                                                    ifelse(opensecretsID == 'EXPERTKOO',2,
+                                                           ifelse(opensecretsID == 'EXPERTMELTZER',2,
+                                                                  ifelse(opensecretsID == 'EXPERTTAYLOR',1,
+                                                                         ifelse(opensecretsID == 'EXPERTMCCLOSKEY',1,
+                                                                                ifelse(grepl('EXPERT',opensecretsID),0,nSons)))))))))),
+         firstDaughter = ifelse(opensecretsID == 'FEDPOWELL',1,
+                                ifelse(opensecretsID == 'FEDBERNANKE',0,
+                                       ifelse(opensecretsID == 'FEDGREENSPAN',0,
+                                              ifelse(opensecretsID == 'FEDYELLEN',0,
+                                                     ifelse(opensecretsID == 'EXPERTKOHN',1,
+                                                            ifelse(opensecretsID == 'EXPERTKOO',0,
+                                                                   ifelse(opensecretsID == 'EXPERTMELTZER',0,
+                                                                          ifelse(opensecretsID == 'EXPERTTAYLOR',0,
+                                                                                 ifelse(opensecretsID == 'EXPERTMCCLOSKEY',0,
+                                                                                        ifelse(grepl('EXPERT',opensecretsID),0,firstDaughter)))))))))))
+
+
+
+
+# -------------------------------------------------------------- Merging Step 1
+# Merging with the bills
+finalMerge %>%
+  left_join(finalBills) %>%
+  select(opensecretsID,matches('_tot|Bill')) %>%
+  drop_na()
+
+finalMerge <- finalMerge %>%
+  left_join(finalBills)
+
+
+# Finally merging with the vote records of who voted against Yellen
+finalMerge <- finalMerge %>%
+  left_join(finalMerge %>%
+              filter(chamber == "Senate",
+                     year == 2014) %>%
+              select(opensecretsID,speaker,party,stab,chamber) %>%
+              distinct() %>%
+              mutate(speaker = gsub('Chairman |Chairwoman |Senator |\\.','',speaker)) %>%
+              left_join(vote %>% mutate(party = Party)) %>%
+              mutate(yellen_vote = ifelse(yellen_vote %in% c('NAY','NV'),1,0)) %>%
+              select(opensecretsID,yellen_vote) %>%
+              filter(!is.na(yellen_vote))) %>%
+  mutate(yellen_vote = ifelse(is.na(yellen_vote),0,yellen_vote))
+
+
+# Save for toxicity prep and topic models
+save(finalMerge,file = './data/prepped/finalData_for_NLP.RData')
+
+# EOF
+```
+
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script estimates a range of topic models.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/prepped/finalData_for_NLP.RData: Prepped data from 6_DATA_intermediate_build.R
+##  - Outputs:
+##    - ./data/prepped/hearings/topic_robustness.RData
+##    - ./data/prepped/hearings/topic_models_100.RData
+##    - ./data/prepped/hearings/topic_robustness_JOPRR1_Grped.RData
+##    - ./data/prepped/hearings/topic_robustness_JOPRR1_spkr.RData
+##    - ./data/prepped/hearings/stm_results.RData
+##    - ./data/prepped/finalData_70kGrped.RData
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+set.seed(12345)
+require(text2vec)
+require(textstem)
+require(stopwords)
+require(tidyverse)
+require(textmineR)
+require(stm)
+require(tm)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+prep_fun = function(x) {
+  x = str_to_lower(x)
+  x = str_replace_all(x, "'", "")
+  x = str_replace_all(x, "[^[:alpha:]]", " ")
+  x = str_replace_all(x, "\\s+", " ")
+}
+
+# Topic model estimated on speaker-hearing concatenated text
+load('./data/prepped/finalData_for_NLP.RData')
+
+text <- finalMerge %>%
+  mutate(textclean = lemmatize_strings(prep_fun(textclean))) %>%
+  filter(!is.na(speaker)) %>%
+  select(fullInd,textclean)
+
+trainText <- text$textclean[1:6000]
+testText <- text$textclean[6001:nrow(text)]
+
+it = itoken(trainText,ids = text$fullInd[1:6000],progressbar = FALSE)
+v = create_vocabulary(it,stopwords = c(gsub("'",'',stopwords())))
+v = prune_vocabulary(v,doc_proportion_max = .2,term_count_min = 20)
+vectorizer = vocab_vectorizer(v)
+dtm = create_dtm(it,vectorizer)
+tcm <- create_tcm(it,vectorizer,skip_grams_window = 10L)
+
+it = itoken(testText,ids = text$fullInd[6001:nrow(text)],progressbar = FALSE)
+dtmTest = create_dtm(it,vectorizer)
+
+perplx <- cohres <- NULL
+for(k in c(10,20,30,50,100,150,200,300,400,500,750,1000)) {
+  set.seed(123)
+  lda_model = LDA$new(n_topics = k, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+  doc_topic_distr = lda_model$fit_transform(x = dtm, n_iter = 1000,convergence_tol = 0.001, n_check_convergence = 25,progressbar = FALSE)
+  tw = lda_model$get_top_words(n = 10, lambda = 1)
+  
+  # Coherence
+  cohTmp <- coherence(tw, tcm, n_doc_tcm = attr(v, 'document_count'))
+  cohres <- bind_rows(data.frame(cohTmp) %>%
+                        mutate(topic = row.names(.),
+                               k = k),cohres)
+  
+  # Perplexity
+  new_doc_topic_distr = lda_model$transform(dtmTest)
+  perplx <- bind_rows(perplx,data.frame(k = k,
+                                        perplexity = perplexity(dtmTest, 
+                                                                topic_word_distribution = lda_model$topic_word_distribution, 
+                                                                doc_topic_distribution = new_doc_topic_distr)))
+  cat(k,'\n')
+}
+
+
+save(perplx,cohres,file = './data/prepped/hearings/topic_robustness.RData')
+
+perplx %>%
+  ggplot(aes(x = k,y = perplexity)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_vline(xintercept = 100)
+
+# Looking at the results
+cohres %>%
+  filter(!is.infinite(mean_logratio),
+         k > 0) %>%
+  group_by(k) %>%
+  # slice_max(mean_logratio,n = 100) %>%
+  summarise_all(mean,na.rm=T) %>%
+  ggplot(aes(x = k,y = mean_logratio)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_vline(xintercept = 100) + 
+  ylab('Coherence (avg. log ratio)')
+
+
+# Choosing the best
+it = itoken(text$textclean,ids = text$fullInd,progressbar = FALSE)
+v = create_vocabulary(it,ngram = c(1,2),stopwords = c(gsub("'",'',stopwords())))
+v = prune_vocabulary(v,doc_proportion_max = .5,term_count_min = 10)
+vectorizer = vocab_vectorizer(v)
+dtm = create_dtm(it,vectorizer)
+set.seed(123)
+lda_model = LDA$new(n_topics = 100, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr = lda_model$fit_transform(x = dtm, n_iter = 1000,convergence_tol = 0.001, n_check_convergence = 25,progressbar = FALSE)
+
+doc_topic_distr <- doc_topic_distr %>%
+  data.frame() %>%
+  mutate(id =  text$fullInd) %>%
+  as_tibble() %>%
+  gather(topic,theta,-id) %>%
+  mutate(topic = gsub('X','',topic))
+
+
+save(doc_topic_distr,lda_model,file = './data/prepped/hearings/topic_models_100.RData')
+
+
+
+
+
+# STM version
+text <- finalMerge %>%
+  mutate(interrupted = ifelse(grepl('--$',textclean),1,0),
+         textclean = lemmatize_strings(prep_fun(textclean))) %>%
+  filter(!is.na(speaker))  %>% 
+  select(textclean,chamber,opensecretsID,position,party,nKids,nDaughters,nSons,votepct_rel,gender,age,seniority,nominate_dim1,fullInd,
+         interrupted)
+
+text %>%
+  count(interrupted)
+
+text$party[which(is.na(text$party))] <- text$position[which(is.na(text$party))]
+text <- text %>%
+  mutate(comparisons = ifelse(grepl('FED',opensecretsID),opensecretsID,
+                              ifelse(chamber == 'Senate',paste0('Senate: ',party),
+                                     paste0('House: ',party))))
+
+processed <- textProcessor(documents = text$textclean,metadata = text)
+out <- prepDocuments(processed$documents,processed$vocab,processed$meta)
+fit <- stm(documents = out$documents,vocab = out$vocab,
+           K = 100,prevalence = ~ comparisons + interrupted + s(nominate_dim1) + age + seniority + gender,
+           max.em.its = 75,data = out$meta,init.type = 'LDA')
+
+prep <- estimateEffect(1:100 ~ comparisons + interrupted + s(nominate_dim1) + age + seniority + gender,
+                       fit,metadata = out$meta,uncertainty = 'Global')
+
+
+save(prep,fit,out,file = './data/prepped/hearings/stm_results.RData')
+
+
+# RR1 work
+topicModel_fun <- function(train,test,text,id,ks = c(10,20,30,50,70,100,150,200,300,400,500,750,1000)) {
+  set.seed(1234)
+  it = itoken(train[[text]],ids = train[[id]],progressbar = FALSE)
+  v = create_vocabulary(it,stopwords = c(gsub("'",'',stopwords())))
+  v = prune_vocabulary(v,doc_proportion_max = .2,term_count_min = 20)
+  vectorizer = vocab_vectorizer(v)
+  dtm = create_dtm(it,vectorizer)
+  tcm <- create_tcm(it,vectorizer,skip_grams_window = 20L)
+  
+  it = itoken(test[[text]],ids = test[[id]],progressbar = FALSE)
+  dtmTest = create_dtm(it,vectorizer)
+  
+  perplx <- cohres <- NULL
+  for(k in ks) {
+    lda_model = LDA$new(n_topics = k, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+    doc_topic_distr = lda_model$fit_transform(x = dtm, n_iter = 1000,convergence_tol = 0.001, n_check_convergence = 25,progressbar = FALSE)
+    tw = lda_model$get_top_words(n = 10, lambda = 1)
+    
+    # Coherence
+    cohTmp <- coherence(tw, tcm, n_doc_tcm = attr(v, 'document_count'))
+    cohres <- bind_rows(data.frame(cohTmp) %>%
+                          mutate(topic = row.names(.),
+                                 k = k),cohres)
+    
+    # Perplexity
+    new_doc_topic_distr = lda_model$transform(dtmTest)
+    perplx <- bind_rows(perplx,data.frame(k = k,perplexity = perplexity(dtmTest, topic_word_distribution = lda_model$topic_word_distribution, doc_topic_distribution = new_doc_topic_distr)))
+    cat(k,'\n')
+  }
+  return(list(perplexity = perplx,
+              coherence = cohres))
+}
+
+# Topic model estimated on speaker-hearing concatenated text (JOP RR1)
+load('./data/prepped/finalData_for_NLP.RData')
+
+text <- finalMerge %>%
+  select(docID,fullInd,opensecretsID,textclean,nchars) %>%
+  group_by(opensecretsID) %>%
+  arrange(opensecretsID,fullInd) %>%
+  mutate(over = nchars > 1000) %>%
+  group_by(opensecretsID) %>%
+  mutate(rwID = cumsum(over != lag(over, default = over[1]))) %>%
+  group_by(opensecretsID,rwID) %>%
+  mutate(cumchars = cumsum(nchars)) %>%
+  ungroup() %>%
+  mutate(group_id = cumsum(cumchars > 1000) + 1) %>%
+  mutate(rwID = ifelse(lag(cumchars) < 1000,lag(rwID),rwID)) %>%
+  group_by(opensecretsID,rwID) %>%
+  mutate(combText = paste(textclean,collapse = '. ')) %>%
+  mutate(rwID = ifelse(is.na(rwID),-1,rwID)) %>%
+  ungroup()
+
+text2 <- text %>%
+  ungroup() %>%
+  select(docID,opensecretsID,rwID,combText) %>%
+  distinct() %>%
+  mutate(textclean = lemmatize_strings(prep_fun(combText))) %>%
+  filter(!is.na(opensecretsID)) %>%
+  mutate(nchars = nchar(textclean)) %>%
+  mutate(uniqueID = paste0(docID,opensecretsID,rwID)) %>%
+  select(uniqueID,textclean)
+
+
+inds <- sample(1:nrow(text2),size = round(nrow(text2)*.5),replace = F)
+train <- text2 %>%
+  slice(inds)
+test <- text2 %>%
+  slice(-inds)
+
+tmRes_Grped <- topicModel_fun(train,test,text = 'textclean',id = 'uniqueID')
+
+
+save(tmRes_Grped,file = './data/prepped/hearings/topic_robustness_JOPRR1_Grped.RData')
+
+
+# Choosing the best
+it = itoken(text2$textclean,ids = text2$uniqueID,progressbar = FALSE)
+v = create_vocabulary(it,ngram = c(1,2),stopwords = c(gsub("'",'',stopwords())))
+v = prune_vocabulary(v,doc_proportion_max = .5,term_count_min = 10)
+vectorizer = vocab_vectorizer(v)
+dtm = create_dtm(it,vectorizer)
+lda_model = LDA$new(n_topics = 70, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr = lda_model$fit_transform(x = dtm, n_iter = 1000,convergence_tol = 0.001, n_check_convergence = 25,progressbar = FALSE)
+
+
+
+doc_topic_distr <- doc_topic_distr %>%
+  data.frame() %>%
+  mutate(id =  text2$uniqueID) %>%
+  as_tibble() %>%
+  gather(topic,theta,-id) %>%
+  mutate(topic = gsub('X','',topic))
+
+text %>%
+  mutate(uniqueID = paste0(docID,opensecretsID,rwID)) %>%
+  count(uniqueID)
+
+doc_topic_distr %>%
+  spread(topic,theta,sep = '70Grped_') %>%
+  rename(uniqueID = id) %>%
+  count(uniqueID)
+
+textToMerge <- text %>%
+  mutate(uniqueID = paste0(docID,opensecretsID,rwID)) %>%
+  left_join(doc_topic_distr %>%
+              spread(topic,theta,sep = '70Grped_') %>%
+              rename(uniqueID = id))
+
+utterance_level <- finalMerge %>%
+  left_join(textToMerge %>%
+              select(docID,opensecretsID,fullInd,matches('topic70Grped')))
+
+# Calculate speaker topics instead
+text <- utterance_level %>%
+  select(docID,fullInd,opensecretsID,textclean,nchars) %>%
+  group_by(docID,opensecretsID) %>%
+  summarise(textclean = paste(textclean,collapse = '. ')) %>%
+  ungroup() %>%
+  mutate(textclean = lemmatize_strings(prep_fun(textclean)),
+         uniqueID = paste0(docID,opensecretsID))
+
+inds <- sample(1:nrow(text),size = round(nrow(text)*.8),replace = F)
+train <- text %>%
+  slice(inds)
+test <- text %>%
+  slice(-inds)
+
+tmRes_spkr <- topicModel_fun(train,test,text = 'textclean',id = 'uniqueID')
+
+save(tmRes_spkr,file = './data/prepped/hearings/topic_robustness_JOPRR1_spkr.RData')
+
+
+# Choosing the best
+it = itoken(text$textclean,ids = text$uniqueID,progressbar = FALSE)
+v = create_vocabulary(it,ngram = c(1,2),stopwords = c(gsub("'",'',stopwords())))
+v = prune_vocabulary(v,doc_proportion_max = .5,term_count_min = 10)
+vectorizer = vocab_vectorizer(v)
+dtm = create_dtm(it,vectorizer)
+lda_model = LDA$new(n_topics = 70, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr = lda_model$fit_transform(x = dtm, n_iter = 1000,convergence_tol = 0.001, n_check_convergence = 25,progressbar = FALSE)
+
+
+doc_topic_distr <- doc_topic_distr %>%
+  data.frame() %>%
+  mutate(id =  text$uniqueID) %>%
+  as_tibble() %>%
+  gather(topic,theta,-id) %>%
+  mutate(topic = gsub('X','',topic))
+
+textToMerge <- text %>%
+  left_join(doc_topic_distr %>%
+              spread(topic,theta,sep = '70Spkr_') %>%
+              rename(uniqueID = id))
+
+utterance_level <- utterance_level %>%
+  left_join(textToMerge %>%
+              select(docID,opensecretsID,matches('topic70Spkr')))
+
+
+topics_toMerge <- utterance_level %>%
+  select(docID,opensecretsID,ind,matches('topic'))
+
+save(topics_toMerge,file = './data/prepped/hearings/topic_models_grp_spkr.RData')
+
+
+# EOF
+```
+
+
+
+```{r}
+################################################################################
+##
+## Purpose: This script assembles the final dataset and does some final cleaning.
+##
+## Author: James Bisbee (james.h.bisbee@vanderbilt.edu)
+##
+##  - Inputs:
+##    - ./data/prepped/finalData_for_NLP.RData: Prepped data from 6_DATA_intermediate_build.R
+##    - ./data/prepped/hearings/toxicity_resultsFull.RData: Prepped data from 8_DATA_toxicity_prep.R (not run)
+##    - ./data/prepped/hearings/topic_models_100.RData: Prepped data from 7_DATA_topic_model_prep.R
+##    - ./data/prepped/hearings/topic_models_grp_spkr.RData: Prepped data from 7_DATA_topic_model_prep.R
+##  - Outputs:
+##    - ./data/prepped/finalData.RData
+##
+##
+## See associated log file for compute environment, package versions, 
+##  and date of most recent run.
+##
+################################################################################
+rm(list = ls())
+gc()
+require(tidyverse)
+set.seed(123)
+
+# Compute details
+print(paste0('Compute environment from ',Sys.Date(),' run by Bisbee'))
+if(Sys.info()['sysname'] == 'Windows') {
+  ram_size = system("wmic MemoryChip get Capacity", intern = TRUE)[-1]
+  model_name = system("wmic cpu get name", intern = TRUE)[2] # nocov
+  vendor_id = system("wmic cpu get manufacturer", intern = TRUE)[2] # nocov
+  
+  print(list(ram = stringr::str_squish(ram_size)[1],
+             vendor_id = stringr::str_squish(vendor_id),
+             model_name = stringr::str_squish(model_name),
+             no_of_cores = parallel::detectCores()))
+} else if(Sys.info()['sysname'] == 'Linuxs') {
+  splitted <- strsplit(system("ps -C rsession -o %cpu,%mem,pid,cmd", intern = TRUE), " ")
+  df <- do.call(rbind, lapply(splitted[-1], 
+                              function(x) data.frame(
+                                cpu = as.numeric(x[2]),
+                                mem = as.numeric(x[4]),
+                                pid = as.numeric(x[5]),
+                                cmd = paste(x[-c(1:5)], collapse = " "))))
+  df
+} else {
+  cat("If not on Linux or Windows, you'll have to figure out your own solution to seeing the compute environment.")
+}
+
+sessionInfo()
+
+
+
+# -------------------------------------------------------------- Merging Step 2
+# Picking back up here after the toxicity and topic models have been prepared
+load('./data/prepped/finalData_for_NLP.RData')
+
+# Loading in the toxicity data: Prepared by ./code/0_DATA_toxicity_prep.R
+load('./data/prepped/hearings/toxicity_resultsFull.RData')
+
+# Loading in the topic model data: Prepared by ./code/0_DATA_topic_model_prep.R
+load('./data/prepped/hearings/topic_models_100.RData')
+
+# Merging with toxicity
+toxic_resFull <- toxic_resFull %>% 
+  rowwise() %>%
+  mutate(combAttack = sum(ATTACK_ON_AUTHOR,IDENTITY_ATTACK,INSULT,THREAT,na.rm=T),
+         combToxic = sum(TOXICITY,PROFANITY,SEXUALLY_EXPLICIT,FLIRTATION,INFLAMMATORY,OBSCENE,na.rm=T),
+         combIncoh = sum(INCOHERENT,UNSUBSTANTIAL,na.rm=T))
+
+colnames(toxic_resFull) <- paste0('SENT_',colnames(toxic_resFull))
+
+finalMerge <- finalMerge %>%
+  left_join(toxic_resFull,by = c('fullInd' = 'SENT_text_id'))
+
+
+# Merging with topic model loadings
+finalMerge <- finalMerge %>%
+  left_join(doc_topic_distr %>% spread(topic,theta,sep = '_'),by = c('fullInd' = 'id'))
+
+colnames(finalMerge)
+
+# Preparing measures
+utterance_level <- finalMerge %>%
+  mutate(date = as.Date(gsub('fed|\\.txt','',docID))) %>%
+  arrange(docID,fullInd,ind) %>%
+  mutate(interruptor = ifelse(grepl('--$',lag(textclean)),1,0),  # Interruptions are characterized by two or more hyphens, followed by an end of line
+         interrupted = ifelse(grepl('--$',textclean),1,0)) %>%
+  mutate(respondingTo = lag(opensecretsID),
+         interruptedBy = lag(opensecretsID)) %>%
+  group_by(opensecretsID) %>%
+  mutate(any = sum(interrupted) > 0) %>% 
+  ungroup() %>%
+  mutate(opensecretsID = relevel(factor(opensecretsID),ref = 'FEDBERNANKE')) %>%
+  mutate(fed = ifelse(grepl('^FED',opensecretsID),1,0), # Indicator for whether the speaker is a Fed chair
+         fedResp = ifelse(grepl('^FED',respondingTo),1,0), # Indicator for whether the person being spoken to is a Fed chair
+         yellen = ifelse(grepl('YELLEN',respondingTo),1,0), # Indicator for whether the person being spoken to Yellen
+         yellenTime = year %in% 2014:2017) %>% # Indicator for whether the hearing is attended by Yellen
+  group_by(fed,docID) %>%
+  mutate(mind = ifelse(nchars == max(nchars*fed),ind,NA)) %>% # A shortcut to identify the opening statement by the Fed chair (slice out the longest utterance by the Fed chair...NB THIS MIGHT NOT ALWAYS BE CORRECT)
+  ungroup() %>%
+  group_by(docID) %>%
+  arrange(ind) %>%
+  fill_('mind',.direction = 'updown') %>%
+  # ungroup() %>%
+  mutate_at(vars(matches('topic_|nchars|SENT_|yellen_vote|constrain_|cent_decent|oversight_'),
+                 age,seniority,votepct,gender,party,nominate_dim1),list(lag = ~lag(.))) %>% # Want nchars, topic loadings, and toxicity measures for the preceding utterance, as well as the covariates of whoever interrupted
+  ungroup() %>%
+  group_by(opensecretsID) %>%
+  mutate(all = n()) %>% 
+  ungroup() %>%
+  mutate_at(vars(matches('lag')),function(x) ifelse(is.na(x),0,x)) %>% # If the lagged measure is NA, replace with zero.
+  mutate(DEM = ifelse(party == 'D',1,0), # Dummies for party of speaker
+         GOP = ifelse(party == 'R',1,0),
+         Male = ifelse(gender == 'M',1,0)) %>% # Dummy for gender of speaker
+  group_by(opensecretsID,docID) %>%
+  mutate(tot_utterances = n()) %>%
+  ungroup() %>%
+  group_by(docID) %>%
+  arrange(ind) %>%
+  mutate(tot_utterances_lag = lag(tot_utterances)) %>%
+  ungroup()
+
+utterance_level <- utterance_level %>%
+  mutate(name = ifelse(opensecretsID == 'EXPERTKOHN','DONALD KOHN',
+                       ifelse(opensecretsID == 'N00003218','HAROLD E. FORD JR.',
+                              ifelse(opensecretsID == 'N00006267','MICHAEL CRAPO',
+                                     ifelse(opensecretsID == 'N00026627','PATRICK T. MCHENRY',
+                                            ifelse(opensecretsID == 'N00029070','JAMES A. HIMES',
+                                                   ifelse(opensecretsID == 'N00029277','GARY C. PETERS',name)))))))
+
+
+# Create a speaker-by-hearing version of the dataset
+speaker_level <- utterance_level %>%
+  filter(ind > mind) %>% # Drop the utterances up to the opening statement by the Fed chair
+  group_by(opensecretsID,party,gender,speaker,respondingTo,fedResp,yellenTime,
+           stab,docID,chamber,nDaughters,nKids,firstDaughter,nSons,
+           constrain_empower_tot,oversight_indep_tot,yellen_vote,votepct,
+           seniority,age,nominate_dim1,fed,year,date,tot_utterances)  %>%
+  summarise(denom = n(), # Total number of utterances by speaker by hearing
+            interrupted = sum(interrupted,na.rm=T), # Total number of utterances that are interrupted by speaker by hearing
+            interruptor = sum(interruptor,na.rm=T), # Total number of utterances that interrupt by speaker by hearing
+            interruptedPct = interrupted*100/denom, # Proportions of utterances that are interrupted by speaker by hearing
+            interruptorPct = interruptor*100/denom, # Proportions of utterances that interrupt by speaker by hearing
+            combAttack = sum(SENT_combAttack,na.rm=T)/denom, # The proportion of all utterances that are an attack, by speaker by hearing
+            combIncoh = sum(SENT_combIncoh,na.rm=T)/denom, # The proportion of all utterances that are incoherent, by speaker by hearing
+            combToxic = sum(SENT_combToxic,na.rm=T)/denom) %>% # The proportion of interruptions that are toxic, by speaker by hearing
+  ungroup() %>%
+  distinct() %>%
+  mutate(respondingTo = relevel(factor(respondingTo),ref = 'FEDBERNANKE'))
+
+
+# Adding in the new topics from the revisions
+load('./data/prepped/hearings/topic_models_grp_spkr.RData')
+utterance_level <- utterance_level %>%
+  left_join(topics_toMerge)
+
+save(utterance_level,speaker_level,file = './data/prepped/finalData.RData')
+
+# EOF
+```
+
+
+
