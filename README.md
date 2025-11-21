@@ -16,7 +16,7 @@ Published in The Journal of politics, 2025-10, Vol.87 (4). Replication materials
 (Bisbee, J., Fraccaroli, N., & Kern, A. (2025). “Yellin’ at Yellen”: Hostile Sexism in the Federal Reserve Congressional Hearings. The Journal of Politics, 87(4), 1365–1382. https://doi.org/10.1086/734254)
 
 # Tutorial
-This README file provides an overview of the replications materials for the article. The R codes used in the article can be found under the folder Codes. The cleaned and prepped texts files that allow for replication is under the folder data. All the images for the main paper are available at the folder output
+This README file provides an overview of the replications materials for the article. The R codes used in the article can be found under the folder codes. The cleaned and prepped texts files that allow for replication is under the folder data. All the images for the main paper are available at the folder output
 
 If other researchers are interested in the processed datasets or raw text files, you can find them <a href="https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/N2XICI">here</a>.
 
