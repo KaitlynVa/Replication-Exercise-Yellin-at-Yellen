@@ -16,18 +16,16 @@ Published in The Journal of politics, 2025-10, Vol.87 (4). Replication materials
 (Bisbee, J., Fraccaroli, N., & Kern, A. (2025). “Yellin’ at Yellen”: Hostile Sexism in the Federal Reserve Congressional Hearings. The Journal of Politics, 87(4), 1365–1382. https://doi.org/10.1086/734254)
 
 # Tutorial
-This README file provides an overview of the replications materials for the article. The R codes used in the article can be found under the folder codes. The cleaned and prepped texts files that allow for replication is under the folder data. All the images for the main paper are available at the folder output
+This README file provides an overview of the replications materials for the article. The R codes used in the article can be found under the folder codes. The cleaned and prepped texts files that allow for replication is under the folder data. All the figures we replicated from the main paper are available in the figures folder. 
 
-If other researchers are interested in the processed datasets or raw text files, you can find them <a href="https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/N2XICI">here</a>.
+If other researchers are interested in replicating this paper, you can find the authors' well-organized and comprehensive replication materials <a href="https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/N2XICI">here</a>.
 
-The codes below begin from prepped datasets. Beginning from the raw text files was beyond our capacity. We also do not replicate all figures found in the original paper, but we do fully replicate the results. 
+The codes below begin from our input data files. We do not necessarily replicate all figures found in the original paper, but we do fully replicate the results per the authors' replication materials as referenced above.
 
 # Codes
-<li><code>code_graph_theory.r</code>: this code replicates figure 1a.</li>
+<li><code>Main_topic_model.r</code>: this code replicates the text processing and models.</li>
 
-<li><code>code_graph_theory.r</code>: this code replicates figure 1a.</li>
-
-<li><code>code_graph_theory.r</code>: this code replicates figure 1a.</li>
+<li><code>figures.r</code>: this code replicates the figures.</li>
 
 # Data
-Data files are available in the data folder. 
+The input data files are available in the data folder. Our output data files were too large to upload to the repository.
